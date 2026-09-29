@@ -10,5 +10,8 @@ int sys_getchar(void);
 void sys_exit(int status);
 int sys_getpid(void);
 int sys_write(const char *buf, int len);
+int sys_segalloc(int npages);
+int sys_mapwin(int winpage, int segpage, int npages);
+int sys_unmapwin(int winpage, int npages);
 
 #endif

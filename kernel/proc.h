@@ -10,6 +10,7 @@
 
 #define NPROC   8
 #define NPAGES  32          /* logical pages per address space (32 x 1KW) */
+#define MAXSEG  128         /* max extra segment pages per process (128KW) */
 
 #define P_FREE     0
 #define P_RUN      1        /* runnable (round-robin candidate) */

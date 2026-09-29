@@ -41,3 +41,10 @@ int sys_getpid(void)      { return __syscall(SYS_GETPID, 0, 0); }
 int sys_write(const char *buf, int len) {
     return __syscall(SYS_WRITE, (int)buf, len);
 }
+int sys_segalloc(int npages) { return __syscall(SYS_SEGALLOC, npages, 0); }
+int sys_mapwin(int winpage, int segpage, int npages) {
+    return __syscall(SYS_MAPWIN, (winpage & 037) | (npages << 5), segpage);
+}
+int sys_unmapwin(int winpage, int npages) {
+    return __syscall(SYS_MAPWIN, (winpage & 037) | (npages << 5), -1);
+}

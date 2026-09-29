@@ -8,6 +8,10 @@
 #include "img_badptr.h"
 #include "img_escape.h"
 #include "img_badread.h"
+#ifdef BIGMEM
+#include "img_bigmem.h"
+#include "img_winfault.h"
+#endif
 
 #define STACKWORDS 1024
 
@@ -34,12 +38,20 @@ int main(void) {
     for (i = 0; i < NWORKERS; i++)
         spawn("worker", img_worker_words, img_worker_nwords,
               img_worker_base, img_worker_stacktop);
+#ifdef BIGMEM
+    /* KERNEL_NOTES.md section 9: >32KW in one process, next to workers */
+    spawn("bigmem", img_bigmem_words, img_bigmem_nwords,
+          img_bigmem_base, img_bigmem_stacktop);
+    spawn("winfault", img_winfault_words, img_winfault_nwords,
+          img_winfault_base, img_winfault_stacktop);
+#else
     spawn("badptr", img_badptr_words, img_badptr_nwords,
           img_badptr_base, img_badptr_stacktop);
     spawn("escape", img_escape_words, img_escape_nwords,
           img_escape_base, img_escape_stacktop);
     spawn("badread", img_badread_words, img_badread_nwords,
           img_badread_base, img_badread_stacktop);
+#endif
     k_start();
     return 0;
 }

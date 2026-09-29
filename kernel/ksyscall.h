@@ -24,4 +24,16 @@
                              count written, or -1 if any word of the
                              buffer is outside the caller's mapped pages. */
 
+/* Big memory beyond a process's 32KW (KERNEL_NOTES.md section 9). */
+#define SYS_SEGALLOC  7   /* arg1 = pages to add to the caller's segment.
+                             returns the new segment size in pages, or -1
+                             (limit MAXSEG=128 pages, or out of frames;
+                             nothing is allocated on failure). */
+#define SYS_MAPWIN    8   /* arg1 = window first logical page (bits 0-4)
+                             | page count << 5; arg2 = first segment page,
+                             or -1 to unmap. returns 0, or -1 if any window
+                             page is an image/stack page, the window runs
+                             past page 31, or the segment range doesn't
+                             exist (nothing is changed on failure). */
+
 #endif
