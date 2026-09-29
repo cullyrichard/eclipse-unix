@@ -4,7 +4,7 @@
 #include "../usys.h"
 
 int main(void) {
-    volatile int *p = (volatile int *)070000;   /* logical page 28 */
+    volatile int *p = (volatile int *)0160000; /* byte address of word 070000: logical page 28 */
     int v;
     sys_write("badread: reading 070000\r\n", 25);
     v = *p;

@@ -4124,7 +4124,7 @@ checked mechanically for equality.
 **Verified**: the worker completes and exits (KERNEL_NOTES.md §6).
 c-testsuite unchanged at 201 in both modes, with the identical per-test set.
 
-### 37. `char` arrays: three distinct miscompiles (open; worked around)
+### 37. `char` arrays: three distinct miscompiles (FIXED by #38)
 
 Minimal repro, `--ieee`:
 
@@ -4153,3 +4153,105 @@ consistent one. The packed-local and halved-offset paths disagree with it.
 **Workaround in use**: `kernel/` and `kernel/user/` keep characters in
 `int` arrays; string literals walked with `s++` work, as in every existing
 driver. **Must be fixed before the filesystem**, which is all byte strings.
+
+
+### 38. Pointer values are byte addresses now; chars pack two per word via LDB/STB (fixes #37 and all non-trivial pointer arithmetic)
+
+**The real bug was bigger than chars.** Extending #37's repro showed int
+pointer arithmetic broken the same way:
+
+```
+walk=440 (108)   -- int *p; p++ advanced 2 words
+adv=16 (13)      -- return p + k from a function: element 2k
+diff=2 (5)       -- q - p for int pointers
+p+=k -> 16 (13)
+```
+
+**Root cause (design, not a single bug).** LLVM's memory model is
+byte-addressed: GEPs, pointer differences, `sizeof`, `memcpy` lengths are
+all bytes, and clang cannot change that (`TargetInfo::getCharWidth()` is
+hard-coded 8, and CodeGen treats CharUnits as LLVM bytes throughout). This
+backend kept pointer VALUES as word addresses and tried to repair the
+byte/word mismatch after the fact with a PerformDAGCombine that halved the
+byte offset in an ADD, but only when it recognized the shape: a WRAPPER'd
+global, a FrameIndex, or a freshly loaded pointer feeding a load/store.
+Every other shape (a pointer incremented and stored back, pointer
+arithmetic crossing a call, pointer subtraction) was off by 2x. Chars
+could never work: halving a byte index loses the lane, so `c[0]` and `c[1]`
+are the same word (collisions in locals), while dgasm stored global
+strings one char per word (misreads), and zero-initialized globals mixed
+both (pmm.c's freemap, PMM_NOTES.md section 6).
+
+"char = one full word" was considered and rejected: it needs clang to have
+16-bit chars (not possible, see above), and faking it with an i8:16
+DataLayout makes clang's `sizeof`/offsets disagree with LLVM's.
+
+**The model now (consistent with LLVM and with DG's own byte pointers):**
+- A pointer VALUE is a byte address: word address * 2 + lane, lane 0 = the
+  high byte. That matches the "E" (big-endian) DataLayout and is exactly
+  the byte pointer the S/140's LDB/STB take (eclipse_cpu.c: `MA = AC >> 1`,
+  bit 0 selects the byte). Chars pack two per word. All pointer
+  arithmetic is plain LLVM byte arithmetic; the halving combine is gone.
+- Word loads/stores through a pointer shift it right once (`MOVZR`)
+  before the existing `@_scratch` indirection (LDIND/STIND).
+- i8/i1 loads and stores are `LDB`/`STB` (zero-extending; sign-extending
+  loads are Expand -> zextload + SIGN_EXTEND_INREG).
+- Direct global/frame accesses are unchanged in cost: `ELDA sym+off/2`,
+  `LDA x,off,2` for plain words. Address-of (`LEAGA`/`LEAFI`) doubles the
+  word address (+1 for an odd offset). Function addresses stay word
+  addresses (CALLIND jumps through them; C does no arithmetic on them).
+- Globals are emitted as their exact DataLayout byte image, packed
+  big-endian two bytes per word, by one serializer (EclipseAsmPrinter.cpp
+  `serializeConstant`); pointer leaves become `sym*2+off` (dgasm
+  expressions). This also fixes --ieee float initializers, which used to
+  be emitted as 0 (#30's preserved gap).
+- varargs step 2 bytes; a VLA's base is returned as a byte address.
+- rt `malloc` counts bytes and rounds each block up to a whole word.
+
+**Consequence for code that talks to hardware: `(unsigned)ptr` is now a
+byte address.** A device that DMAs to a buffer needs `>> 1`, and an
+absolute word address W is the pointer `(T *)(2*W)`. Updated here:
+`examples/dsk.c`, `zebra.c`, `vulcan.c`, `kismet.c` (DMA memory
+address), `fps.c` (`host_dma_in`/`host_dma_out` take the cast pointer and
+shift it), the kernel's `SYS_WRITE` (reads byte lanes from a byte
+address), and the kernel's user programs with absolute addresses
+(badptr/badread/winfault/bigmem). The kernel's and worker's `int`
+character buffers are real `char` arrays again. `examples/pmm.c`'s
+freemap stays `int` (one word per flag, no reason to change).
+
+**Verified:**
+- `examples/char_ptr_test.c` (the extended repro: zero-init/string/local
+  char arrays, char pointer params, `p++` walking, pointer-to-literal and
+  pointer-into-array globals, struct with char fields in globals and
+  locals, `sizeof`, `signed char`, strlen/strcpy/strcmp/memcpy on each
+  kind, int pointer walk/advance/difference): **ok=38 bad=0**. The
+  pre-#38 llc built from the same source gets 15 FAILs, then hangs at
+  `JMP 0`.
+- c-testsuite (`run-c-testsuite.sh`): **201 -> 206 in both --ieee and
+  default mode, zero regressions**, diffed test by test. Newly passing:
+  00179, 00180, 00205, 00216 (was TIMEOUT), 00218.
+- `pmm_test.c`: byte-identical to PMM_NOTES.md's transcript, including the
+  physical-frame checks.
+- `blockdev_test.c` (disk DMA through the updated dsk.c): identical to
+  BLOCKDEV_NOTES.md, and the raw image holds `0o123456 0o377 0o177777` at
+  block 7.
+- Kernel: the default build (5 workers + 3 bad programs), `-DBIGMEM`
+  (96KW segment verified, errs=0, 6 bad-arg calls -> -1, winfault killed)
+  and the 8-process 200-round soak (6391 ticks, all workers e=0, 992
+  frames back) all behave as before; SYS_WRITE now takes ordinary char
+  buffers and packed string literals.
+
+**Not verified / open:**
+- Nothing on real hardware. Programs built for it (mandel240_*, fps
+  tests) must be rebuilt, and their DMA path now depends on `fps.c`'s
+  `data >>= 1`.
+- `examples/syscall_test.c` built with `eclipse-cc` (now that it takes
+  `.s`) prints `H` and then crashes, with BOTH the pre-#38 and the new
+  llc, in both float modes. So this is pre-existing, likely SYSCALL_NOTES.md
+  section 2's "handler always re-enables user mode, wrong for a
+  supervisor-mode caller"; not investigated here.
+- Cost: every word access through a runtime pointer gains one `MOVZR`, and
+  every address-of a global/local gains an `ADD`. A load through
+  `FrameIndex + constant` (e.g. the 2nd word of a local `long`) now goes
+  through LDIND instead of a direct `LDA x,off,2`; that's correct, just
+  slower. Worth a Select() fold later.

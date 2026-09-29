@@ -9,7 +9,7 @@ void kputs(const char *s) {
 }
 
 static void kputbase(unsigned int v, unsigned int base) {
-    int buf[8];         /* int, not char: char arrays miscompile (KERNEL_NOTES.md) */
+    char buf[8];
     int n = 0;
     do {
         buf[n] = ('0' + v % base);

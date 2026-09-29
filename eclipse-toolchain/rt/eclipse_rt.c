@@ -578,11 +578,17 @@ int atoi(const char *s) {
  * fake reclamation. See stdlib.h.
  */
 #define HEAP_WORDS 1024
-static char heap[HEAP_WORDS];
+/* Byte-addressed since DEBUGGING_NOTES.md #38 (pointers are byte
+ * addresses, chars packed two per word): the arena is HEAP_WORDS words =
+ * 2*HEAP_WORDS bytes, and every block is rounded up to a whole word so
+ * the next one stays word-aligned for int/long/pointer members. */
+#define HEAP_BYTES (2 * HEAP_WORDS)
+static char heap[HEAP_BYTES];
 static unsigned int heap_used = 0;
 
 void *malloc(unsigned int size) {
-  if (heap_used + size > HEAP_WORDS) {
+  size = (size + 1) & ~1u;
+  if (size > HEAP_BYTES - heap_used) {
     return (void *)0;
   }
   void *p = &heap[heap_used];

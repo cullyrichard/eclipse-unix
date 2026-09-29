@@ -32,7 +32,7 @@ static unsigned int pat(unsigned int sp, unsigned int off, unsigned int pid) {
 
 int main(void) {
     unsigned int pid = (unsigned int)sys_getpid();
-    unsigned int *w = (unsigned int *)040000;
+    unsigned int *w = (unsigned int *)0100000; /* byte address of word 040000 (page WIN) */
     unsigned int chunk, i, round, errs = 0, base;
     int r;
 

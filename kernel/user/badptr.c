@@ -4,7 +4,7 @@
 #include "../usys.h"
 
 int main(void) {
-    volatile int *p = (volatile int *)070000;   /* logical page 28 */
+    volatile int *p = (volatile int *)0160000; /* byte address of word 070000: logical page 28 */
     sys_write("badptr: poking 070000\r\n", 23);
     *p = 1234;
     sys_write("badptr: STILL ALIVE (bug)\r\n", 27);

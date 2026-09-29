@@ -118,6 +118,10 @@ fps_word_struct read_md(unsigned int results_addr) {
 
 void host_dma_out(unsigned int data,unsigned int data_length,unsigned int results_addr, int fmt_flag)
 {
+    /* `data` is a host buffer address as produced by (unsigned int)ptr,
+     * i.e. a BYTE address since DEBUGGING_NOTES.md #38; the DMA engines
+     * take word addresses. */
+    data >>= 1;
     fpu_clr();
 
     adp_out(cmd_adp_hmal|cmd_wr,data);
@@ -142,6 +146,10 @@ void host_dma_out(unsigned int data,unsigned int data_length,unsigned int result
 void host_dma_in(unsigned int data, unsigned int data_length,unsigned int results_addr,int fmt_flag)
 
 {
+    /* `data` is a host buffer address as produced by (unsigned int)ptr,
+     * i.e. a BYTE address since DEBUGGING_NOTES.md #38; the DMA engines
+     * take word addresses. */
+    data >>= 1;
     IO_PULSE_PULSE(FPU_DEV); /* NIOP 054 -- reset the FPU */
 
     fpu_clr();

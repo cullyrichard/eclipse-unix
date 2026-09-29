@@ -123,7 +123,7 @@ static int vulcan_rw(unsigned int unit, unsigned long blockno,
     /* DOB ("Specify Memory Address", pgmref.pdf p.7): bit0 = extended
      * memory address LSB (left 0), bits1-15 = memory address. Combined
      * with the S pulse that starts the transfer. */
-    dob_word = (unsigned int)(unsigned long)buf & 0x7FFFu;
+    dob_word = ((unsigned int)(unsigned long)buf >> 1) & 0x7FFFu; /* pointer values are byte addresses (DEBUGGING_NOTES.md #38); DMA wants the word address */
     dskp_dobs_start(dob_word);
 
     /* --- Check status: a coarse OR of each register's single summary

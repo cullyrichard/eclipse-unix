@@ -8,12 +8,10 @@
  * number, AC1 = arg1, AC2 = arg2, `SYC 1,1`; result comes back in AC0.
  * 0-3 keep examples/syscall.h's numbering.
  *
- * Pointers are plain word addresses on this backend. SYS_WRITE's buffer is
- * "one character per word, starting at logical word address arg1" in the
- * calling process's own address space. A string literal is laid out that
- * way (dgasm stores one character per word); an `int` array filled with
- * characters is too. Local and zero-initialized `char` arrays are NOT
- * reliable on this backend yet -- see KERNEL_NOTES.md, "char arrays".
+ * Pointer values are BYTE addresses (DEBUGGING_NOTES.md #38): chars are
+ * packed two per word, high byte first, exactly as LDB/STB address them.
+ * SYS_WRITE's arg1 is such a byte address in the caller's address space,
+ * so any ordinary `char` buffer or string literal can be passed.
  */
 
 #define SYS_PUTCHAR   0   /* arg1 = character. returns 0. */

@@ -228,7 +228,7 @@ static int zebra_rw(unsigned int unit, unsigned long blockno,
 
     /* Specify Memory Address (bit0 = EMA LSB, left 0) + S pulse to
      * start the transfer; dskp_dobs_start() polls SKPDN to completion. */
-    dob_word = (unsigned int)(unsigned long)buf & 0x7FFFu;
+    dob_word = ((unsigned int)(unsigned long)buf >> 1) & 0x7FFFu; /* pointer values are byte addresses (DEBUGGING_NOTES.md #38); DMA wants the word address */
     dskp_dobs_start(dob_word);
 
     /* Check status. DIA's error-bits field is returned directly to the

@@ -806,10 +806,10 @@ index 000000000..a0154fe9c
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp
 new file mode 100644
-index 000000000..9c51ea417
+index 000000000..808e748f8
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp
-@@ -0,0 +1,832 @@
+@@ -0,0 +1,568 @@
 +//===-- EclipseAsmPrinter.cpp - Eclipse LLVM assembly writer ------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -854,29 +854,6 @@ index 000000000..9c51ea417
 +INITIALIZE_PASS(EclipseAsmPrinter, "eclipse-asm-printer",
 +                 "Eclipse Assembly Printer", false, false)
 +
-+// dgasm's real string-literal escaping (confirmed against a real dgasm
-+// binary by the sibling eccc project — crates/eccc-codegen/src/
-+// symbolic.rs's escape_dgasm_string). NUL termination is dgasm's own job
-+// ("dgasm NUL-terminates `var` strings automatically"), not added here.
-+static std::string escapeDgasmString(StringRef S) {
-+  std::string Out;
-+  for (unsigned char B : S) {
-+    switch (B) {
-+    case '\n': Out += "\\n"; break;
-+    case '\t': Out += "\\t"; break;
-+    case '\r': Out += "\\r"; break;
-+    case '"': Out += "\\\""; break;
-+    case '\\': Out += "\\\\"; break;
-+    default:
-+      if (B >= 0x20 && B <= 0x7e)
-+        Out += static_cast<char>(B);
-+      else
-+        Out += ("\\" + Twine::utohexstr(B)).str(); // best-effort; see README.md
-+    }
-+  }
-+  return Out;
-+}
-+
 +// This target's `float`/`double` are both 32 bits wide (double aliased
 +// to float -- see README.md/SOFT_FLOAT_NOTES.md), so getValueAPF()'s
 +// bitcastToAPInt() is always exactly 32 bits here; DEBUGGING_NOTES.md
@@ -887,46 +864,6 @@ index 000000000..9c51ea417
 +  return static_cast<uint32_t>(CFP->getValueAPF().bitcastToAPInt().getZExtValue());
 +}
 +
-+// Total number of Eclipse (16-bit) words a value of type Ty occupies once
-+// fully flattened -- i.e. the same word count flattenConstant
-+// (emitGlobalVariable, below) would produce for a *non*-zero initializer of
-+// this type, recursing through every nested array/struct level rather than
-+// stopping at the outermost one.
-+//
-+// This exists because ArrayType::getNumElements() only ever reports its
-+// own, immediate dimension's element count. That's exactly right for a
-+// genuinely one-dimensional array, but for a real multi-dimensional array
-+// type -- `static T arr[R][C];` with no explicit initializer is the
-+// common case, and is exactly what GV->getValueType() looks like for such
-+// a global: ArrayType([R x ArrayType([C x T])]) -- naively using just
-+// getNumElements() (R) silently reserves R words of storage instead of the
-+// true R*C*wordsPerElement(T). Confirmed via a minimal repro and a
-+// byte-level trace on real eclipseemu: a zero-initialized `unsigned int
-+// band[BAND_ROWS][IMG_WIDTH]` reserved only BAND_ROWS words, so every
-+// element from index BAND_ROWS onward (i.e. almost the entire array,
-+// whenever IMG_WIDTH > 1) silently aliased whatever global happened to be
-+// laid out immediately afterward — the program's own printf format
-+// strings, in the repro's case, corrupted byte-for-byte by the array's own
-+// runtime-indexed writes. Both the address *arithmetic* the C code
-+// generates (GEP/HALVE lowering in EclipseISelLowering.cpp) and the loads/
-+// stores it selects were independently confirmed correct via
-+// `-debug-only=isel` DAG dumps for this same repro — this is purely a
-+// storage-under-reservation bug, not an addressing bug, and no other file
-+// needed to change. See DEBUGGING_NOTES.md for the full writeup.
-+static uint64_t countFlattenedWords(Type *Ty) {
-+  if (auto *AT = dyn_cast<ArrayType>(Ty))
-+    return AT->getNumElements() * countFlattenedWords(AT->getElementType());
-+  if (auto *ST = dyn_cast<StructType>(Ty)) {
-+    uint64_t Total = 0;
-+    for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i)
-+      Total += countFlattenedWords(ST->getElementType(i));
-+    return Total;
-+  }
-+  if (auto *IT = dyn_cast<IntegerType>(Ty))
-+    return (IT->getBitWidth() + 15) / 16;
-+  return 1; // unsupported leaf type (e.g. float) -- one word, matching
-+            // flattenConstant's own zero/undef-leaf fallback below.
-+}
 +
 +bool EclipseAsmPrinter::doInitialization(Module &M) {
 +  HasMain = M.getFunction("main") != nullptr;
@@ -1057,337 +994,142 @@ index 000000000..9c51ea417
 +// LEAGA comments, and DEBUGGING_NOTES.md, for what this replaced.
 +void EclipseAsmPrinter::emitEndOfAsmFile(Module &M) {}
 +
++// Global initializers (DEBUGGING_NOTES.md #38). Pointer values are byte
++// addresses, so a global's storage is exactly its DataLayout byte image,
++// packed two bytes per 16-bit word, big-endian (byte 0 = the high byte,
++// matching the "E" DataLayout and LDB/STB's lane numbering). Every
++// initializer -- scalars, strings, arrays, structs, nested aggregates --
++// goes through one serializer driven by the DataLayout's own sizes and
++// struct offsets, so what is in memory always agrees with the addresses
++// the code generator computes. This replaces separate string /
++// numeric-array / struct paths that laid data out one word per element
++// (strings via dgasm's unpacked `"..."`), which disagreed with LLVM's
++// byte-scaled addressing.
++//
++// A pointer-valued leaf becomes a dgasm expression instead of a number:
++// `sym*2+off` for data (the byte address of a word-aligned dgasm label),
++// `sym` for a function (code pointers stay word addresses -- see LEAGA).
++// Words are emitted as `var name`, `var name_w1`, ...; the suffixed names
++// are never referenced, they just reserve and fill consecutive words.
++namespace {
++struct GlobalImage {
++  SmallVector<uint8_t, 64> Bytes;
++  // Byte offset (always even: pointers are 2-byte aligned) -> expression.
++  SmallVector<std::pair<uint64_t, std::string>, 4> Relocs;
++};
++} // namespace
++
++static std::string withOffset(const std::string &Base, int64_t O) {
++  if (O == 0)
++    return Base;
++  return Base + (O > 0 ? "+" : "") + std::to_string(O);
++}
++
++static void serializeConstant(const Constant *C, uint64_t Off,
++                              const DataLayout &DL, bool IEEEFloat,
++                              GlobalImage &Img, AsmPrinter &AP) {
++  auto putBE = [&](uint64_t At, const APInt &V) {
++    unsigned N = V.getBitWidth() / 8;
++    for (unsigned i = 0; i != N; ++i)
++      Img.Bytes[At + i] = static_cast<uint8_t>(
++          V.lshr((N - 1 - i) * 8).trunc(8).getZExtValue());
++  };
++  if (isa<ConstantAggregateZero>(C) || isa<UndefValue>(C) ||
++      isa<ConstantPointerNull>(C))
++    return; // bytes already zero
++  if (const auto *CI = dyn_cast<ConstantInt>(C)) {
++    unsigned Bytes = DL.getTypeStoreSize(CI->getType());
++    putBE(Off, CI->getValue().zextOrTrunc(Bytes * 8));
++    return;
++  }
++  if (const auto *CFP = dyn_cast<ConstantFP>(C)) {
++    // 32 bits in both float modes: IEEE-754 bits with --ieee, the DG
++    // hex-float image otherwise (constantFPBits32, entry #30). --ieee used
++    // to emit 0 here (entry #30's documented, deliberately preserved gap);
++    // the unified serializer emits the real bits.
++    uint32_t Bits = IEEEFloat
++        ? static_cast<uint32_t>(
++              CFP->getValueAPF().bitcastToAPInt().getZExtValue())
++        : constantFPBits32(CFP);
++    putBE(Off, APInt(32, Bits));
++    return;
++  }
++  if (const auto *CDS = dyn_cast<ConstantDataSequential>(C)) {
++    uint64_t Stride = DL.getTypeAllocSize(CDS->getElementType());
++    for (unsigned i = 0, e = CDS->getNumElements(); i != e; ++i)
++      serializeConstant(CDS->getElementAsConstant(i), Off + i * Stride, DL,
++                        IEEEFloat, Img, AP);
++    return;
++  }
++  if (const auto *CA = dyn_cast<ConstantArray>(C)) {
++    uint64_t Stride = DL.getTypeAllocSize(CA->getType()->getElementType());
++    for (unsigned i = 0, e = CA->getNumOperands(); i != e; ++i)
++      serializeConstant(CA->getOperand(i), Off + i * Stride, DL, IEEEFloat,
++                        Img, AP);
++    return;
++  }
++  if (const auto *CS = dyn_cast<ConstantStruct>(C)) {
++    const StructLayout *SL = DL.getStructLayout(CS->getType());
++    for (unsigned i = 0, e = CS->getNumOperands(); i != e; ++i)
++      serializeConstant(CS->getOperand(i), Off + SL->getElementOffset(i), DL,
++                        IEEEFloat, Img, AP);
++    return;
++  }
++  if (C->getType()->isPointerTy()) {
++    if (const auto *CE = dyn_cast<ConstantExpr>(C)) {
++      if (CE->getOpcode() == Instruction::IntToPtr)
++        if (const auto *CI = dyn_cast<ConstantInt>(CE->getOperand(0))) {
++          putBE(Off, CI->getValue().zextOrTrunc(16));
++          return;
++        }
++    }
++    APInt GOff(16, 0);
++    const Value *Base = C->stripAndAccumulateConstantOffsets(
++        DL, GOff, /*AllowNonInbounds*/ true);
++    if (const auto *GVal = dyn_cast<GlobalValue>(Base)) {
++      if (Off % 2 != 0)
++        report_fatal_error("Eclipse: pointer at an odd byte offset in a "
++                           "global initializer");
++      std::string Name = AP.getSymbol(GVal)->getName().str();
++      int64_t O = GOff.getSExtValue();
++      Img.Relocs.push_back(
++          {Off, isa<Function>(GVal) ? withOffset(Name, O)
++                                    : withOffset(Name + "*2", O)});
++      return;
++    }
++  }
++  report_fatal_error("Eclipse: unsupported constant in a global initializer");
++}
++
 +void EclipseAsmPrinter::emitGlobalVariable(const GlobalVariable *GV) {
 +  MCSymbol *Sym = getSymbol(GV);
-+  if (!GV->hasInitializer()) {
-+    OutStreamer->emitRawText(("var " + Twine(Sym->getName()) + " = 0").str());
-+    return;
-+  }
-+  const Constant *Init = GV->getInitializer();
++  const DataLayout &DL = GV->getDataLayout();
++  uint64_t Size = DL.getTypeAllocSize(GV->getValueType());
++  uint64_t Words = std::max<uint64_t>(1, (Size + 1) / 2);
 +
-+  if (const auto *CDA = dyn_cast<ConstantDataArray>(Init)) {
-+    if (CDA->isString()) {
-+      StringRef S = CDA->getAsString();
-+      S.consume_back(StringRef("\0", 1)); // dgasm adds its own terminator
-+      OutStreamer->emitRawText(("var " + Twine(Sym->getName()) + " = \"" +
-+                                 escapeDgasmString(S) + "\"")
-+                                    .str());
-+      return;
-+    }
-+  }
-+
-+  // A scalar pointer initializer that's the address of another global (a
-+  // function or a data global) -- e.g. `int (*fp)() = foo;` or `int *p =
-+  // &g;` -- rather than materializing it at runtime the way LEAGA does for
-+  // an ordinary *value* use, this can go directly into the `var` line as a
-+  // symbol reference: dgasm resolves `var NAME = OTHERSYMBOL` to
-+  // OTHERSYMBOL's own assigned address at assemble time -- the same
-+  // "symbol[+N]" expression-folding dgasm's assembler does for every
-+  // ELEF/ELDA/ESTA address operand elsewhere in this file (see LEAGA's
-+  // emitInstruction case).
-+  // No offset/GEP/bitcast unwrapping attempted here -- only a bare
-+  // GlobalValue used directly as the initializer, which is what `&foo`/`foo`
-+  // (a function decaying to its own pointer) actually look like at the IR
-+  // level; anything more complex still falls through to the "unsupported"
-+  // case at the end of this function, same as before this existed.
-+  if (const auto *GVInit = dyn_cast<GlobalValue>(Init)) {
-+    OutStreamer->emitRawText(("var " + Twine(Sym->getName()) + " = " +
-+                               Twine(getSymbol(GVInit)->getName()))
-+                                  .str());
-+    return;
-+  }
-+
-+  // A scalar `float`/`double` initializer (e.g. `static float ga = 12.5f;`)
-+  // -- DEBUGGING_NOTES.md entry #30. Pre-entry-#30 (and still, with
-+  // `+ieee` set -- see Eclipse.td's FeatureIEEEFloat), this fell all the
-+  // way through to the generic "unsupported leaf constant" fallback at
-+  // the end of this function and silently materialized as a single zero
-+  // word -- a real, confirmed, pre-existing bug (entry #27 point 9),
-+  // *not* fixed unconditionally here since doing so would make `+ieee`
-+  // fail its own "byte-for-byte identical to every pre-entry-#30 build"
-+  // requirement. Emits the constant's real IEEE-754 bit pattern (not
-+  // DG hex-float -- entry #30's own design-rationale comment on
-+  // Eclipse.td's FeatureIEEEFloat explains why a true native hex-float
-+  // ABI wasn't pursued end-to-end) as two words, most-significant first,
-+  // using the exact same "`_word1`, decimal, most-significant-first"
-+  // convention the >16-bit ConstantInt case just below already
-+  // establishes -- so this target's existing "access word N of a bulk
-+  // global" addressing (LEAGA/ELDA/ESTA, EclipseISelLowering.cpp's
-+  // PerformDAGCombine) finds it correctly with no further backend
-+  // support needed.
-+  if (const auto *CFP = dyn_cast<ConstantFP>(Init)) {
++  GlobalImage Img;
++  Img.Bytes.assign(Words * 2, 0);
++  if (GV->hasInitializer()) {
 +    const EclipseSubtarget &STI =
 +        static_cast<const EclipseTargetMachine &>(TM).getSubtarget();
-+    if (!STI.hasIEEEFloat()) {
-+      uint32_t Bits = constantFPBits32(CFP);
-+      OutStreamer->emitRawText(
-+          ("var " + Twine(Sym->getName()) + " = " +
-+           Twine(static_cast<int64_t>(static_cast<int16_t>(Bits >> 16))))
-+              .str());
-+      OutStreamer->emitRawText(
-+          ("var " + Twine(Sym->getName()) + "_word1 = " +
-+           Twine(static_cast<int64_t>(static_cast<int16_t>(Bits & 0xFFFFu))))
-+              .str());
-+      return;
-+    }
-+    // +ieee: fall through to the "unsupported leaf constant" case at the
-+    // end of this function, preserving this target's original behavior
-+    // (silently materializes as 0) exactly.
++    serializeConstant(GV->getInitializer(), 0, DL, STI.hasIEEEFloat(), Img,
++                      *this);
 +  }
 +
-+  if (const auto *CI = dyn_cast<ConstantInt>(Init)) {
-+    // A scalar initializer wider than one Eclipse word (e.g. a 32-bit
-+    // `long`/`unsigned long`, this target's only scalar type besides i16)
-+    // needs one `var` line *per word*, most-significant first — the same
-+    // multi-word layout the `_off1`/"access word N" indirect-addressing
-+    // scheme (see LEAGA's emitInstruction case and
-+    // EclipseISelLowering.cpp's PerformDAGCombine) already assumes every
-+    // >16-bit global has. A single `var NAME = <64-bit decimal value>`
-+    // line here does NOT do that: dgasm's `var` only ever reserves and
-+    // deposits *one* word, silently truncating the decimal value to its
-+    // low 16 bits at parse time. This was a real, previously-undiscovered
-+    // bug, not a hypothetical: confirmed by tracing a `static u32 g_a =
-+    // 0x40400000UL;` global on eclipseemu all the way down to its actual
-+    // deposited memory contents — both words came back 0x0000 (0x40400000
-+    // truncated mod 2^16 happens to be exactly 0 for that value, which is
-+    // what made it look, from the *load* side alone, like a "high word
-+    // right, low word wrong" bug rather than "the global's storage was
-+    // never really 32 bits wide in the first place"). Any 32-bit-wide
-+    // global's arithmetic silently corrupts as a result, regardless of
-+    // whether the *load* path is otherwise correct.
-+    unsigned BitWidth = CI->getBitWidth();
-+    if (BitWidth <= 16) {
-+      OutStreamer->emitRawText(("var " + Twine(Sym->getName()) + " = " +
-+                                 Twine(CI->getSExtValue()))
-+                                    .str());
-+      return;
++  for (uint64_t w = 0; w != Words; ++w) {
++    std::string Val;
++    for (const auto &R : Img.Relocs)
++      if (R.first == w * 2)
++        Val = R.second;
++    if (Val.empty()) {
++      int16_t V = static_cast<int16_t>((Img.Bytes[2 * w] << 8) |
++                                       Img.Bytes[2 * w + 1]);
++      Val = std::to_string(V);
 +    }
-+    APInt Val = CI->getValue();
-+    unsigned NumWords = (BitWidth + 15) / 16;
-+    for (unsigned i = 0; i != NumWords; ++i) {
-+      unsigned ShiftAmt = (NumWords - 1 - i) * 16;
-+      int16_t Word =
-+          static_cast<int16_t>(Val.lshr(ShiftAmt).trunc(16).getZExtValue());
-+      // Only the first (most-significant) word keeps the real symbol
-+      // name — LEAGA/ELDAGA/ESTAGA always materialize/access *this*
-+      // word's address directly, and every later word is only ever
-+      // reached relative to it via a "target+N" address expression
-+      // (extendedAddrExpr), never addressed by its own name — same
-+      // convention emitArrayElements below already uses for
-+      // array elements past the first.
-+      std::string Name = i == 0 ? Sym->getName().str()
-+                                 : (Sym->getName() + "_word" + Twine(i)).str();
-+      OutStreamer->emitRawText(
-+          ("var " + Twine(Name) + " = " + Twine(static_cast<int64_t>(Word)))
-+              .str());
-+    }
-+    return;
++    std::string Name = w == 0 ? Sym->getName().str()
++                              : (Sym->getName() + "_w" + Twine(w)).str();
++    OutStreamer->emitRawText(("var " + Twine(Name) + " = " + Twine(Val)).str());
 +  }
-+
-+  // Numeric array initializer (e.g. `static const unsigned int prog[] =
-+  // {...}`) — every array element becomes its own `var` line, in order,
-+  // so dgasm's own sequential address assignment (each `var` line takes
-+  // the next word) naturally lays them out contiguously; C-level
-+  // pointer/index arithmetic on the array (computed relative to the
-+  // *first* element's address, which is this global's own symbol) then
-+  // finds every later element correctly with no further backend support
-+  // needed. Only the first element keeps the real symbol name — the
-+  // rest just need *a* unique, never-referenced-by-name label so dgasm
-+  // accepts the declaration; nothing ever addresses them by name.
-+  //
-+  // This was a real, silent bug before this comment existed: an array
-+  // initializer that reached neither the ConstantInt nor the
-+  // ConstantDataArray-isString() case above fell through to a single
-+  // placeholder `var NAME = 0` word instead of the real data — so any
-+  // array with more than one element silently lost everything past its
-+  // first word, and indexing into it read whatever unrelated global
-+  // happened to be laid out next. Found by tracing actual DOA/DOB
-+  // values sent to a real device on eclipseemu and discovering the
-+  // "array" data was actually a different global's string contents.
-+  auto emitArrayElements = [&](unsigned NumElts,
-+                                llvm::function_ref<int64_t(unsigned)> At) {
-+    for (unsigned i = 0; i != NumElts; ++i) {
-+      std::string Name = i == 0 ? Sym->getName().str()
-+                                 : (Sym->getName() + "_elem" + Twine(i)).str();
-+      OutStreamer->emitRawText(
-+          ("var " + Twine(Name) + " = " + Twine(At(i))).str());
-+    }
-+  };
-+
-+  if (const auto *CDA = dyn_cast<ConstantDataArray>(Init)) {
-+    // Reached only for the non-string (numeric) case now — isString()
-+    // was already handled and returned above.
-+    emitArrayElements(CDA->getNumElements(), [&](unsigned i) {
-+      return CDA->getElementAsAPInt(i).getSExtValue();
-+    });
-+    return;
-+  }
-+
-+  if (const auto *CA = dyn_cast<ConstantArray>(Init)) {
-+    emitArrayElements(CA->getNumOperands(), [&](unsigned i) {
-+      if (const auto *Elt = dyn_cast<ConstantInt>(CA->getOperand(i)))
-+        return Elt->getSExtValue();
-+      return int64_t{0}; // non-integer element: still not supported
-+    });
-+    return;
-+  }
-+
-+  if (isa<ConstantAggregateZero>(Init)) {
-+    if (auto *AT = dyn_cast<ArrayType>(GV->getValueType())) {
-+      // See countFlattenedWords's own comment: AT->getNumElements() alone
-+      // is only this array's outer/immediate dimension, which silently
-+      // under-reserves storage for a genuinely multi-dimensional array
-+      // type (or an array of structs) -- use the fully recursive
-+      // flattened count instead.
-+      uint64_t Total = countFlattenedWords(AT);
-+      emitArrayElements(static_cast<unsigned>(Total), [](unsigned) { return 0; });
-+      return;
-+    }
-+  }
-+
-+  // Struct initializer (e.g. `static fps_word_struct g = {...};`) —
-+  // flattened field-by-field into one `var` line per word, in source
-+  // field order, on the same "sequential `var` lines lay out
-+  // contiguously, only the first keeps the real symbol name" convention
-+  // emitArrayElements above already relies on. This backend has no
-+  // padding to account for: every scalar field here is i16- or
-+  // (32-bit-as-two-i16-words) granular (see the ConstantInt case above),
-+  // so the field's own declaration order *is* its word order.
-+  //
-+  // This was a real, confirmed bug before this existed, not a
-+  // hypothetical gap: a struct-typed global fell all the way through to
-+  // the single-placeholder-word case below regardless of how many fields
-+  // it actually had, so every field past the first silently aliased
-+  // whatever global happened to be laid out immediately after it in
-+  // page-zero — confirmed by tracing a 3-word `fps_word_struct` global
-+  // whose `.mh`/`.ml` fields came back reading two bytes of an unrelated
-+  // string constant's own text, and confirming the *values* computed
-+  // going *into* the struct were correct at every call site the whole
-+  // time (i.e. this was purely a storage-size bug, not a codegen bug in
-+  // whatever computed the field values).
-+  //
-+  // flattenConstant recurses through nested aggregates (a struct field
-+  // that's itself an array or struct, or vice versa) rather than only
-+  // handling one level, since dgasm's sequential `var` layout needs the
-+  // *fully* flattened word sequence regardless of how deep the C-level
-+  // nesting is. Each flattened word is the literal RHS text for its own
-+  // `var` line -- almost always a decimal number, but a struct field that's
-+  // itself a pointer to another global (a function pointer field, e.g.
-+  // `struct S { int (*fptr)(); } s = { &zero };`) instead becomes a symbol
-+  // reference to that global's own assembler name, exactly like the
-+  // top-level scalar-pointer-initializer case just above this lambda
-+  // (same dgasm `var NAME = OTHERSYMBOL` mechanism relied on elsewhere in
-+  // this file) -- this was a real, confirmed gap, not
-+  // a hypothetical: `struct S s = { &zero };` previously fell through to
-+  // the final "unsupported leaf constant" case below and silently stored a
-+  // literal 0 instead of zero's real address (found via c-testsuite 00089,
-+  // "calling through a function pointer reached via nested struct/typedef
-+  // indirection" -- traced directly to this exact fallback). A field type
-+  // genuinely unsupported here (a float; a pointer expression more complex
-+  // than a bare GlobalValue, e.g. an offset/bitcast -- this target has no
-+  // register class for a directly materializable float constant, and no
-+  // attempt is made here to compute a compile-time symbol-plus-offset
-+  // expression dgasm might not accept anyway) still degrades to a single
-+  // zero word for just that field rather than losing the fields around it.
-+  std::function<void(const Constant *, Type *, SmallVectorImpl<std::string> &)>
-+      flattenConstant = [&](const Constant *C, Type *Ty,
-+                             SmallVectorImpl<std::string> &Out) {
-+        if (!C || isa<ConstantAggregateZero>(C) || isa<UndefValue>(C)) {
-+          if (auto *ST = dyn_cast<StructType>(Ty)) {
-+            for (unsigned i = 0, e = ST->getNumElements(); i != e; ++i)
-+              flattenConstant(nullptr, ST->getElementType(i), Out);
-+          } else if (auto *AT = dyn_cast<ArrayType>(Ty)) {
-+            for (unsigned i = 0, e = AT->getNumElements(); i != e; ++i)
-+              flattenConstant(nullptr, AT->getElementType(), Out);
-+          } else if (auto *IT = dyn_cast<IntegerType>(Ty)) {
-+            unsigned NumWords = (IT->getBitWidth() + 15) / 16;
-+            for (unsigned i = 0; i != NumWords; ++i)
-+              Out.push_back("0");
-+          } else {
-+            Out.push_back("0"); // unsupported leaf type
-+          }
-+          return;
-+        }
-+        if (const auto *GVLeaf = dyn_cast_or_null<GlobalValue>(C)) {
-+          Out.push_back(getSymbol(GVLeaf)->getName().str());
-+          return;
-+        }
-+        // A `float`/`double` struct field -- same DEBUGGING_NOTES.md
-+        // entry #30 handling as the top-level scalar case above (see its
-+        // own comment), just emitting into this lambda's flattened word
-+        // list instead of directly to a `var` line. `+ieee` deliberately
-+        // falls through to the "unsupported leaf constant" case at the
-+        // bottom of this lambda, preserving the original single-zero-word
-+        // behavior exactly.
-+        if (const auto *CFP = dyn_cast_or_null<ConstantFP>(C)) {
-+          const EclipseSubtarget &STI =
-+              static_cast<const EclipseTargetMachine &>(TM).getSubtarget();
-+          if (!STI.hasIEEEFloat()) {
-+            uint32_t Bits = constantFPBits32(CFP);
-+            Out.push_back(
-+                Twine(static_cast<int64_t>(static_cast<int16_t>(Bits >> 16)))
-+                    .str());
-+            Out.push_back(Twine(static_cast<int64_t>(
-+                                     static_cast<int16_t>(Bits & 0xFFFFu)))
-+                              .str());
-+            return;
-+          }
-+        }
-+        if (const auto *CI = dyn_cast_or_null<ConstantInt>(C)) {
-+          unsigned BitWidth = CI->getBitWidth();
-+          if (BitWidth <= 16) {
-+            Out.push_back(Twine(CI->getSExtValue()).str());
-+            return;
-+          }
-+          APInt Val = CI->getValue();
-+          unsigned NumWords = (BitWidth + 15) / 16;
-+          for (unsigned i = 0; i != NumWords; ++i) {
-+            unsigned ShiftAmt = (NumWords - 1 - i) * 16;
-+            Out.push_back(Twine(static_cast<int16_t>(
-+                                     Val.lshr(ShiftAmt).trunc(16).getZExtValue()))
-+                              .str());
-+          }
-+          return;
-+        }
-+        if (const auto *CS = dyn_cast_or_null<ConstantStruct>(C)) {
-+          for (unsigned i = 0, e = CS->getNumOperands(); i != e; ++i)
-+            flattenConstant(CS->getOperand(i),
-+                             CS->getOperand(i)->getType(), Out);
-+          return;
-+        }
-+        if (const auto *CA = dyn_cast_or_null<ConstantArray>(C)) {
-+          for (unsigned i = 0, e = CA->getNumOperands(); i != e; ++i)
-+            flattenConstant(CA->getOperand(i),
-+                             CA->getOperand(i)->getType(), Out);
-+          return;
-+        }
-+        if (const auto *CDA = dyn_cast_or_null<ConstantDataArray>(C)) {
-+          for (unsigned i = 0, e = CDA->getNumElements(); i != e; ++i)
-+            Out.push_back(Twine(CDA->getElementAsAPInt(i).getSExtValue()).str());
-+          return;
-+        }
-+        Out.push_back("0"); // unsupported leaf constant (e.g. a float)
-+      };
-+
-+  if (isa<StructType>(GV->getValueType()) &&
-+      (isa<ConstantStruct>(Init) || isa<ConstantAggregateZero>(Init))) {
-+    SmallVector<std::string, 8> Words;
-+    flattenConstant(Init, GV->getValueType(), Words);
-+    for (unsigned i = 0, e = Words.size(); i != e; ++i) {
-+      std::string Name = i == 0 ? Sym->getName().str()
-+                                 : (Sym->getName() + "_field" + Twine(i)).str();
-+      OutStreamer->emitRawText(
-+          ("var " + Twine(Name) + " = " + Twine(Words[i])).str());
-+    }
-+    return;
-+  }
-+
-+  // Anything else beyond a simple i16 scalar, string literal, numeric
-+  // array, or struct isn't materialized yet — see README.md "Known
-+  // limitations".
-+  OutStreamer->emitRawText(
-+      ("var " + Twine(Sym->getName()) + " = 0 // TODO: unsupported initializer")
-+          .str());
 +}
 +
 +void EclipseAsmPrinter::emitConstantPool() {
@@ -1408,45 +1150,26 @@ index 000000000..9c51ea417
 +  }
 +}
 +
-+// Builds the dgasm address-expression text for an ELEF/ELDA/ESTA
-+// instruction targeting a GlobalAddress operand: the target's own symbol
-+// name, plus "+N"/"-N" if the operand carries a nonzero compile-time
-+// offset. dgasm's expression evaluator resolves "symbol+integer" to the
-+// symbol's own assigned address plus that integer at assemble time
-+// (confirmed empirically -- see DEBUGGING_NOTES.md), so folding a
-+// constant offset in here needs no extra instruction or page-zero word,
-+// unlike the old LEAGA/_PTR scheme's runtime AC2-based ADD for the same
-+// case.
-+//
-+// MO.getOffset() is a *byte* offset (LLVM's GlobalAddress offsets always
-+// are), but this backend's addresses are word-granular (every Eclipse
-+// word is 2 of those DataLayout bytes -- same reason
-+// EclipseFrameLowering::processFunctionBeforeFrameFinalized divides
-+// object sizes by 2). That "2 DataLayout bytes per word" rule only holds
-+// for globals this backend actually *packs* two-bytes-to-a-word -- i.e.
-+// numeric array initializers, emitted one full word per element by
-+// emitGlobalVariable regardless of the element's own DataLayout size (so
-+// 2 bytes worth of offset really does mean 1 word of address). A string
-+// literal is emitted completely differently: dgasm's `var name = "..."`
-+// (no `packed` suffix) reserves one full word *per character* (see
-+// dgasm's assembler.c, VARIABLE_STRING vs VARIABLE_PACKED_STRING) -- so a
-+// byte offset into a string is already a word offset, and dividing it by
-+// 2 here would truncate every *odd* byte offset down to its even
-+// neighbour's word, silently reading/writing the wrong character (the
-+// exact bug the original LEAGA implementation of this same rule fixed --
-+// see the "found via a local char arr[5]" history in this project's
-+// DEBUGGING_NOTES.md).
-+std::string EclipseAsmPrinter::extendedAddrExpr(const MachineOperand &MO) {
++// Builds the dgasm word-address expression for ELDA/ESTA (ELDAGA/ESTAGA)
++// and the ELEF of LEAGA: the global's own label plus the operand's
++// constant offset. MO.getOffset() is a BYTE offset, and every global is
++// laid out as its DataLayout byte image, two bytes per word
++// (DEBUGGING_NOTES.md #38), so the word is label + floor(offset/2). The
++// odd bit only matters to LEAGA's byte-address result and is returned via
++// *OddByte; a word access (ELDA/ESTA) at an odd byte offset cannot arise
++// for 2-byte-aligned i16 and is rejected rather than silently truncated.
++// dgasm resolves "symbol+integer" at assemble time.
++std::string EclipseAsmPrinter::extendedAddrExpr(const MachineOperand &MO,
++                                                bool *OddByte) {
 +  StringRef Target = getSymbol(MO.getGlobal())->getName();
-+  int64_t Divisor = 2;
-+  if (const auto *GV = dyn_cast<GlobalVariable>(MO.getGlobal())) {
-+    if (GV->hasInitializer()) {
-+      if (const auto *CDA = dyn_cast<ConstantDataArray>(GV->getInitializer()))
-+        if (CDA->isString())
-+          Divisor = 1;
-+    }
-+  }
-+  int64_t Offset = MO.getOffset() / Divisor;
++  int64_t ByteOff = MO.getOffset();
++  bool Odd = (ByteOff & 1) != 0;
++  if (OddByte)
++    *OddByte = Odd;
++  else if (Odd)
++    report_fatal_error("Eclipse: word access to a global at an odd byte "
++                       "offset");
++  int64_t Offset = ByteOff >> 1; // floor, also for negative offsets
 +  if (Offset == 0)
 +    return Target.str();
 +  return (Target + (Offset > 0 ? "+" : "") + Twine(Offset)).str();
@@ -1571,13 +1294,26 @@ index 000000000..9c51ea417
 +    return;
 +  }
 +  case Eclipse::LEAGA: {
-+    StringRef Dst = EclipseInstPrinter::getRegisterName(MI->getOperand(0).getReg());
-+    std::string Addr = extendedAddrExpr(MI->getOperand(1));
 +    // ELEF: real Eclipse S/140 "extended load effective address" -- loads
-+    // the operand's own resolved *address*, not the word stored there
-+    // (confirmed empirically -- see DEBUGGING_NOTES.md). A single
-+    // instruction, no page-zero pointer word at all.
++    // the operand's own resolved word address. A data pointer VALUE is a
++    // byte address, so double it and add the lane (DEBUGGING_NOTES.md
++    // #38). A function's address stays a word address (CALLIND jumps
++    // through it as-is; C does no arithmetic on code pointers).
++    StringRef Dst = EclipseInstPrinter::getRegisterName(MI->getOperand(0).getReg());
++    const MachineOperand &MO = MI->getOperand(1);
++    if (isa<Function>(MO.getGlobal())) {
++      std::string Addr = getSymbol(MO.getGlobal())->getName().str();
++      if (MO.getOffset())
++        Addr += (MO.getOffset() > 0 ? "+" : "") + std::to_string(MO.getOffset());
++      OutStreamer->emitRawText((Twine("\tELEF ") + Dst + "," + Addr).str());
++      return;
++    }
++    bool Odd = false;
++    std::string Addr = extendedAddrExpr(MO, &Odd);
 +    OutStreamer->emitRawText((Twine("\tELEF ") + Dst + "," + Addr).str());
++    OutStreamer->emitRawText((Twine("\tADD ") + Dst + "," + Dst).str());
++    if (Odd)
++      OutStreamer->emitRawText((Twine("\tINC ") + Dst + "," + Dst).str());
 +    return;
 +  }
 +  case Eclipse::ELDAGA: {
@@ -1644,10 +1380,10 @@ index 000000000..9c51ea417
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseAsmPrinter.h b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.h
 new file mode 100644
-index 000000000..cd561d350
+index 000000000..4d27c2c2c
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.h
-@@ -0,0 +1,118 @@
+@@ -0,0 +1,119 @@
 +//===-- EclipseAsmPrinter.h - Eclipse LLVM assembly writer -----*- C++ -*-===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -1720,7 +1456,8 @@ index 000000000..cd561d350
 +  // definition in EclipseAsmPrinter.cpp for the full rationale (dgasm's
 +  // "symbol+integer" expression folding, and the byte-vs-word offset
 +  // divisor rule shared with emitGlobalVariable).
-+  std::string extendedAddrExpr(const MachineOperand &MO);
++  std::string extendedAddrExpr(const MachineOperand &MO,
++                               bool *OddByte = nullptr);
 +
 +  // NB: internal JMPs (conditional-branch trailing jumps and plain
 +  // unconditional ones) stay direct/PC-relative, base-ISA JMP (no
@@ -2058,10 +1795,10 @@ index 000000000..1002a0ccd
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSEFRAMELOWERING_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseISelDAGToDAG.cpp b/llvm/lib/Target/Eclipse/EclipseISelDAGToDAG.cpp
 new file mode 100644
-index 000000000..a4880e3ab
+index 000000000..4f78fbe16
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseISelDAGToDAG.cpp
-@@ -0,0 +1,106 @@
+@@ -0,0 +1,115 @@
 +//===-- EclipseISelDAGToDAG.cpp - A dag to dag inst selector -------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -2134,6 +1871,13 @@ index 000000000..a4880e3ab
 +  }
 +  case ISD::LOAD: {
 +    auto *LD = cast<LoadSDNode>(Node);
++    // Only plain word loads map onto `LDA dst,off,2`. A byte (i8/i1)
++    // extending load must go through LDB with a byte pointer
++    // (DEBUGGING_NOTES.md #38) -- the FrameIndex then selects to LEAFI,
++    // which yields that byte address.
++    if (LD->getExtensionType() != ISD::NON_EXTLOAD ||
++        LD->getMemoryVT() != MVT::i16)
++      break;
 +    if (auto *FIN = dyn_cast<FrameIndexSDNode>(LD->getBasePtr())) {
 +      SDValue TFI = CurDAG->getTargetFrameIndex(FIN->getIndex(), MVT::i16);
 +      SDValue Ops[] = {TFI, LD->getChain()};
@@ -2146,6 +1890,8 @@ index 000000000..a4880e3ab
 +  }
 +  case ISD::STORE: {
 +    auto *ST = cast<StoreSDNode>(Node);
++    if (ST->isTruncatingStore() || ST->getMemoryVT() != MVT::i16)
++      break; // byte store: STB via a LEAFI byte pointer (see above)
 +    if (auto *FIN = dyn_cast<FrameIndexSDNode>(ST->getBasePtr())) {
 +      SDValue TFI = CurDAG->getTargetFrameIndex(FIN->getIndex(), MVT::i16);
 +      SDValue Ops[] = {ST->getValue(), TFI, ST->getChain()};
@@ -2170,10 +1916,10 @@ index 000000000..a4880e3ab
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
 new file mode 100644
-index 000000000..2cf47e4a5
+index 000000000..cb8925bb5
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
-@@ -0,0 +1,1989 @@
+@@ -0,0 +1,1825 @@
 +//===-- EclipseISelLowering.cpp - Eclipse DAG Lowering Implementation ---===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -2230,11 +1976,19 @@ index 000000000..2cf47e4a5
 +  // as a plain i16 one — LDFI/STFI (custom-selected in
 +  // EclipseISelDAGToDAG.cpp, which is already extension-agnostic) and
 +  // LDABS/STABS/LDIND/STIND (declarative patterns added below).
++  //
++  // SUPERSEDED (DEBUGGING_NOTES.md #38): pointer values are now BYTE
++  // addresses and i8/i1 memory accesses are real byte accesses via the
++  // S/140's LDB/STB (EclipseInstrInfo.td), so chars pack two per word,
++  // matching LLVM's own byte-addressed DataLayout. LDB zero-extends, so a
++  // sign-extending byte load is expanded into zextload + SIGN_EXTEND_INREG.
 +  for (MVT VT : {MVT::i1, MVT::i8}) {
 +    setLoadExtAction(ISD::EXTLOAD, MVT::i16, VT, Legal);
-+    setLoadExtAction(ISD::SEXTLOAD, MVT::i16, VT, Legal);
++    setLoadExtAction(ISD::SEXTLOAD, MVT::i16, VT, Expand);
 +    setLoadExtAction(ISD::ZEXTLOAD, MVT::i16, VT, Legal);
-+    setTruncStoreAction(MVT::i16, VT, Legal);
++    // i8: STB. i1 has no truncstore fragment to match; Expand widens it to
++    // a byte store.
++    setTruncStoreAction(MVT::i16, VT, VT == MVT::i8 ? Legal : Expand);
 +  }
 +  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i8, Custom);
 +  setOperationAction(ISD::SIGN_EXTEND_INREG, MVT::i1, Expand);
@@ -2824,196 +2578,13 @@ index 000000000..2cf47e4a5
 +    return SDValue();
 +  }
 +
-+  if (N->getOpcode() != ISD::ADD || N->getValueType(0) != MVT::i16)
-+    return SDValue();
-+
-+  SDValue N0 = N->getOperand(0);
-+  SDValue N1 = N->getOperand(1);
-+
-+  auto IsWrappedGlobal = [](SDValue V) {
-+    return V.getOpcode() == EclipseISD::WRAPPER &&
-+           V.getOperand(0).getOpcode() == ISD::TargetGlobalAddress;
-+  };
-+  // Constants routed through the constant pool (see the ISD::Constant
-+  // comment in the constructor) arrive here as WRAPPER(ConstantPool), not
-+  // a raw ConstantSDNode — checked separately below alongside the direct
-+  // ConstantSDNode case, since it isn't certain at this combine's point
-+  // in the pipeline which form a small constant offset like the
-+  // multi-word-global "access word N" case actually takes.
-+  auto IsWrappedConstant = [](SDValue V) {
-+    return V.getOpcode() == EclipseISD::WRAPPER &&
-+           V.getOperand(0).getOpcode() == ISD::TargetConstantPool;
-+  };
-+
-+  SDValue Base, Offset;
-+  bool BaseIsFrameIndex = false;
-+  if (IsWrappedGlobal(N0)) {
-+    Base = N0;
-+    Offset = N1;
-+  } else if (IsWrappedGlobal(N1)) {
-+    Base = N1;
-+    Offset = N0;
-+  } else if (N0.getOpcode() == ISD::FrameIndex) {
-+    Base = N0;
-+    Offset = N1;
-+    BaseIsFrameIndex = true;
-+  } else if (N1.getOpcode() == ISD::FrameIndex) {
-+    Base = N1;
-+    Offset = N0;
-+    BaseIsFrameIndex = true;
-+  } else if ((N0.getOpcode() == ISD::LOAD) != (N1.getOpcode() == ISD::LOAD)) {
-+    // Neither operand is a bare FrameIndex or WRAPPER'd global, but
-+    // exactly one is a fresh LOAD -- plausibly a pointer *value* read
-+    // back from its own stack slot (e.g. a `const T arr[]` parameter, or
-+    // any other local pointer variable: this backend reloads such values
-+    // from memory at every use rather than keeping them live in a
-+    // register across statement boundaries). Such a loaded pointer is
-+    // exactly as word-granular as a global's or a local array's address
-+    // — confirmed empirically: a runtime index into an array reached via
-+    // a pointer *parameter* (as opposed to a locally-declared array,
-+    // already covered by the FrameIndex case above) landed on element
-+    // 2*i instead of element i, the identical symptom as the two bugs
-+    // documented above this function, just reached through a base
-+    // pointer shape neither existing case recognized.
-+    //
-+    // The one-operand-is-a-LOAD shape alone isn't a safe enough signal by
-+    // itself, though: plenty of perfectly ordinary integer arithmetic
-+    // adds two loaded values together with no pointer involved at all
-+    // (e.g. `a[i] = b[j] + c[k]`), and halving one side of that would
-+    // silently corrupt it. What actually distinguishes the runtime-GEP
-+    // case is what this ADD's *result* feeds: pointer arithmetic is
-+    // consumed directly as a LOAD/STORE's base-pointer operand, while
-+    // ordinary arithmetic never is. EclipseISelDAGToDAG.cpp's ISD::LOAD/
-+    // ISD::STORE handling confirms this ADD is still exactly that base-
-+    // pointer operand at the point this combine runs — a non-FrameIndex
-+    // base falls through to the generic LDIND/STIND pattern completely
-+    // unchanged, so gating on that usage is both necessary and sufficient
-+    // to catch this case without misfiring on unrelated arithmetic that
-+    // never becomes an address.
-+    bool FeedsMemoryAddress = llvm::any_of(N->users(), [&](SDNode *User) {
-+      if (auto *LD = dyn_cast<LoadSDNode>(User))
-+        return LD->getBasePtr().getNode() == N;
-+      if (auto *ST = dyn_cast<StoreSDNode>(User))
-+        return ST->getBasePtr().getNode() == N;
-+      return false;
-+    });
-+    if (!FeedsMemoryAddress)
-+      return SDValue();
-+    if (N0.getOpcode() == ISD::LOAD) {
-+      Base = N0;
-+      Offset = N1;
-+    } else {
-+      Base = N1;
-+      Offset = N0;
-+    }
-+    // A loaded pointer value has no analogous "already halved, embedded
-+    // in the node" mechanism the way a global's LEAGA/offset-slot
-+    // printing does (see the comment below) — treat it like the
-+    // FrameIndex case: a compile-time-constant Offset here (e.g.
-+    // `arr[3]` through a pointer parameter) still needs the same /2 fix,
-+    // not just the runtime-index case.
-+    BaseIsFrameIndex = true;
-+  } else {
-+    return SDValue();
-+  }
-+
-+  // A compile-time-constant Offset paired with a *global* Base here is
-+  // *not* the runtime-GEP case this combine exists for — it's the generic
-+  // type legalizer's own "access word N of a value that didn't fit in one
-+  // register" address computation (e.g. splitting a 32-bit load/store on
-+  // a >16-bit global into two i16 halves reaches the second one via
-+  // `base + 1`), which is already word-granular. Confirmed empirically as
-+  // a real, previously-undiscovered bug: halving that constant-1 offset
-+  // (0 after integer division) silently redirected the "high word" access
-+  // onto the same address as the low word, corrupting every 32-bit
-+  // arithmetic op whose operand round-tripped through such a global.
-+  // Constant offsets that *do* need the byte->word fix (a real GEP into
-+  // an array of i16/i32) are already folded directly into
-+  // GlobalAddressSDNode's own offset field by LowerGlobalAddress (see
-+  // this function's header comment) and never reach here as a separate
-+  // ADD operand at all — so excluding constants here only excludes cases
-+  // that were never this combine's intended target in the first place.
-+  //
-+  // A FrameIndex Base is a *different* situation, confirmed via a second,
-+  // independent repro (two file-scope `u32` globals added together,
-+  // tracked down with `llc -debug-only=isel`/hand-tracing the emitted
-+  // assembly): the type legalizer's "access word N" address computation
-+  // for a *local* multi-word value (e.g. the second/low word of a 32-bit
-+  // stack slot, reached whenever the frame index doesn't reduce to a bare
-+  // FrameIndexSDNode base pointer that EclipseISelDAGToDAG's custom
-+  // ISD::LOAD/ISD::STORE handling can absorb directly) has no analogous
-+  // "already-divided, embedded in the node" mechanism the way
-+  // LowerGlobalAddress/LEAGA's offset-slot printing does for globals —
-+  // it reaches here as a genuinely still-byte-granular ADD(FrameIndex,
-+  // Constant) needing the same /2 fix as the runtime-GEP case. Leaving it
-+  // unhalved (as the global-only guard below did) computes the wrong
-+  // word address for that second word (e.g. base+2 instead of base+1),
-+  // silently reading/writing one word further than intended — this is
-+  // exactly the corruption the multi-word-global repro traced back to
-+  // once the global-load path itself was ruled out (verified correct by
-+  // hand against the emitted LEAGA/offset-slot sequence).
-+  if (!BaseIsFrameIndex &&
-+      (isa<ConstantSDNode>(Offset) || IsWrappedConstant(Offset)))
-+    return SDValue();
-+
-+  SelectionDAG &DAG = DCI.DAG;
-+  SDLoc dl(N);
-+
-+  // A byte-scaled index of exactly 2 (an i16 element) commonly reaches
-+  // here not as a MUL-by-constant but as a *self-add* (`X+X`) — LowerShift
-+  // custom-lowers `X << 1` that way (see LowerShift's comment above), and
-+  // GEP's own generic lowering will sometimes produce the multiply
-+  // pre-strength-reduced into a shift too. Emitting a real runtime HALVE
-+  // (an actual DIV instruction, see below) to undo an addend that's
-+  // *already* visibly just `X+X` is pure waste — a real division for a
-+  // value that's algebraically just X again — and on a program with many
-+  // such array accesses the extra instructions are enough to push a
-+  // branch target past dgasm's 0-255 page-relative JMP range (confirmed
-+  // empirically: this was silently bloating every runtime GEP through a
-+  // loaded pointer parameter enough to break an otherwise-fine program).
-+  // Recognize the shape directly and skip the round trip.
-+  if (Offset.getOpcode() == ISD::ADD &&
-+      Offset.getOperand(0) == Offset.getOperand(1)) {
-+    SDValue Halved = Offset.getOperand(0);
-+    return DAG.getNode(EclipseISD::WORD_ADD, dl, MVT::i16, Base, Halved);
-+  }
-+
-+  // A string-literal-backed global is the one Base shape that must NOT
-+  // be halved here, matching EclipseAsmPrinter.cpp's own LEAGA-offset
-+  // case (see its isString() check): dgasm emits a string initializer
-+  // one full word per character ("var name = ...", no packed suffix),
-+  // never two-bytes-to-a-word the way a numeric array is packed, so a
-+  // runtime index into one is already word-granular. Only reachable
-+  // when Base is the WRAPPER'd-global case above -- BaseIsFrameIndex is
-+  // true for both the real-FrameIndex and loaded-pointer cases, neither
-+  // of which has an underlying GlobalVariable to inspect (and both
-+  // always need the halving regardless: this target's frame allocator
-+  // packs every local, char arrays included, two bytes to a word). A
-+  // real, confirmed-the-hard-way bug: a plain hex-digit lookup table
-+  // ("0123456789abcdef"[val & 15]) silently read back element (val&15)/2
-+  // instead of element val&15 -- val=255 printed "77" instead of "ff",
-+  // both recursive calls' "val and 15 == 15" landing on element 7 (='7')
-+  // instead of element 15 (='f').
-+  if (!BaseIsFrameIndex) {
-+    if (auto *GA = dyn_cast<GlobalAddressSDNode>(Base.getOperand(0))) {
-+      if (const auto *GV = dyn_cast<GlobalVariable>(GA->getGlobal())) {
-+        if (GV->hasInitializer()) {
-+          if (const auto *CDA =
-+                  dyn_cast<ConstantDataArray>(GV->getInitializer())) {
-+            if (CDA->isString())
-+              return DAG.getNode(EclipseISD::WORD_ADD, dl, MVT::i16, Base,
-+                                  Offset);
-+          }
-+        }
-+      }
-+    }
-+  }
-+
-+  SDValue TwoCP = DAG.getConstantPool(
-+      ConstantInt::get(*DAG.getContext(), APInt(16, 2)), MVT::i16);
-+  SDValue Two = LowerConstantPool(TwoCP, DAG);
-+  SDValue Halved = DAG.getNode(EclipseISD::HALVE, dl, MVT::i16, Offset, Two);
-+  return DAG.getNode(EclipseISD::WORD_ADD, dl, MVT::i16, Base, Halved);
++  // The ISD::ADD "halve the byte offset before adding it to a word
++  // pointer" rewrite that used to live here is gone (DEBUGGING_NOTES.md
++  // #38): pointer values are byte addresses now, so LLVM's own byte-scaled
++  // GEP arithmetic is already correct as plain ADDs. The old rewrite only
++  // recognized a few DAG shapes, so any other pointer arithmetic (p++,
++  // p+k returned from a function, q-p) was off by a factor of two.
++  return SDValue();
 +}
 +
 +// No *single-bit* shift/rotate-with-writeback hardware is exposed here
@@ -3508,8 +3079,10 @@ index 000000000..2cf47e4a5
 +  // read garbage for the second when this incorrectly added instead —
 +  // it was walking away from the pushed arguments instead of through
 +  // them, off into whatever else happened to occupy higher addresses.
++  // Varargs sit one word apart, at DESCENDING addresses (FP-5-i): step the
++  // byte-address va_list back by one word = 2 bytes.
 +  SDValue NextPtr = DAG.getNode(ISD::SUB, dl, MVT::i16, VAList,
-+                                 DAG.getConstant(1, dl, MVT::i16));
++                                 DAG.getConstant(2, dl, MVT::i16));
 +  SDValue Chain2 = DAG.getStore(Result.getValue(1), dl, NextPtr, VAListPtr,
 +                                 MachinePointerInfo());
 +
@@ -3583,7 +3156,10 @@ index 000000000..2cf47e4a5
 +  // building a second DAG.getConstant(1, ...) -- see this function's
 +  // other comment on why a freshly-built plain ISD::Constant isn't
 +  // safe to feed into certain custom-lowered nodes here.
-+  SDValue Base = DAG.getNode(ISD::ADD, dl, MVT::i16, OldTop, One);
++  SDValue BaseWord = DAG.getNode(ISD::ADD, dl, MVT::i16, OldTop, One);
++  // OldTop/BaseWord are word addresses (the hardware stack pointer at 040);
++  // the pointer value handed back to C is a byte address.
++  SDValue Base = DAG.getNode(ISD::ADD, dl, MVT::i16, BaseWord, BaseWord);
 +
 +  SDValue Ops[2] = {Base, NewChain};
 +  return DAG.getMergeValues(Ops, dl);
@@ -3989,15 +3565,21 @@ index 000000000..2cf47e4a5
 +                                                           bool IsLoad) const {
 +  const auto &TII = *MBB->getParent()->getSubtarget<EclipseSubtarget>().getInstrInfo();
 +  DebugLoc DL = MI.getDebugLoc();
++  // The pointer operand is a byte address (DEBUGGING_NOTES.md #38): shift
++  // it right once to get the word address the indirect access needs.
++  MachineRegisterInfo &MRI = MBB->getParent()->getRegInfo();
++  Register Word = MRI.createVirtualRegister(&Eclipse::GPRRegClass);
 +  if (IsLoad) {
 +    Register Dst = MI.getOperand(0).getReg();
 +    Register Addr = MI.getOperand(1).getReg();
-+    BuildMI(*MBB, MI, DL, TII.get(Eclipse::STABS)).addReg(Addr).addExternalSymbol("_scratch");
++    BuildMI(*MBB, MI, DL, TII.get(Eclipse::SHR1), Word).addReg(Addr);
++    BuildMI(*MBB, MI, DL, TII.get(Eclipse::STABS)).addReg(Word).addExternalSymbol("_scratch");
 +    BuildMI(*MBB, MI, DL, TII.get(Eclipse::LDABSI), Dst).addExternalSymbol("_scratch");
 +  } else {
 +    Register Src = MI.getOperand(0).getReg();
 +    Register Addr = MI.getOperand(1).getReg();
-+    BuildMI(*MBB, MI, DL, TII.get(Eclipse::STABS)).addReg(Addr).addExternalSymbol("_scratch");
++    BuildMI(*MBB, MI, DL, TII.get(Eclipse::SHR1), Word).addReg(Addr);
++    BuildMI(*MBB, MI, DL, TII.get(Eclipse::STABS)).addReg(Word).addExternalSymbol("_scratch");
 +    BuildMI(*MBB, MI, DL, TII.get(Eclipse::STABSI)).addReg(Src).addExternalSymbol("_scratch");
 +  }
 +  MI.eraseFromParent();
@@ -5005,10 +4587,10 @@ index 000000000..9a6d041d3
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSEINSTRINFO_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseInstrInfo.td b/llvm/lib/Target/Eclipse/EclipseInstrInfo.td
 new file mode 100644
-index 000000000..0eb936b5a
+index 000000000..52917c85c
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseInstrInfo.td
-@@ -0,0 +1,796 @@
+@@ -0,0 +1,810 @@
 +//===- EclipseInstrInfo.td - Eclipse Instruction defs ------*- tablegen -*-=//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -5376,10 +4958,27 @@ index 000000000..0eb936b5a
 +def STIND : EclipsePseudo<(outs), (ins GPR:$src, GPR:$addr), "# STIND",
 +                           [(store GPR:$src, GPR:$addr)]>;
 +}
-+def : Pat<(i16 (extloadi8  GPR:$addr)), (LDIND GPR:$addr)>;
-+def : Pat<(i16 (sextloadi8 GPR:$addr)), (LDIND GPR:$addr)>;
-+def : Pat<(i16 (zextloadi8 GPR:$addr)), (LDIND GPR:$addr)>;
-+def : Pat<(truncstorei8 GPR:$src, GPR:$addr), (STIND GPR:$src, GPR:$addr)>;
++// Byte access (DEBUGGING_NOTES.md #38): every pointer VALUE on this target
++// is a byte address (word address * 2 + lane, lane 0 = the high/left byte,
++// matching the big-endian "E" DataLayout), which is exactly the byte
++// pointer the real S/140 LDB/STB instructions take (eclipse_cpu.c: MA =
++// AC[ptr] >> 1, AC[ptr] & 1 selects the right byte). LDB zero-extends into
++// bits 8-15 of its destination. Sign-extending byte loads are Expand
++// (zextload + SIGN_EXTEND_INREG, see the constructor). dgasm's operand
++// order is `LDB ptr,dst` / `STB ptr,src`.
++let mayLoad = 1 in
++def LDB8 : EclipseInst<(outs GPR:$dst), (ins GPR:$addr), "LDB $addr,$dst", []>;
++let mayStore = 1 in
++def STB8 : EclipseInst<(outs), (ins GPR:$src, GPR:$addr), "STB $addr,$src", []>;
++def : Pat<(i16 (extloadi8  GPR:$addr)), (LDB8 GPR:$addr)>;
++def : Pat<(i16 (zextloadi8 GPR:$addr)), (LDB8 GPR:$addr)>;
++def : Pat<(i16 (extloadi1  GPR:$addr)), (LDB8 GPR:$addr)>;
++def : Pat<(i16 (zextloadi1 GPR:$addr)), (LDB8 GPR:$addr)>;
++def : Pat<(truncstorei8 GPR:$src, GPR:$addr), (STB8 GPR:$src, GPR:$addr)>;
++
++// Logical shift right by one (Nova ALC: MOV, carry Zero, shift Right):
++// turns a byte address into the word address LDIND/STIND dereference.
++def SHR1 : EclipseInst<(outs GPR:$dst), (ins GPR:$src), "MOVZR $src,$dst", []>;
 +
 +// A second, independent page-zero scratch word (`_scratch2`), used ONLY
 +// for a load/store whose address is exactly an EclipseWordAdd node --
@@ -5416,10 +5015,7 @@ index 000000000..0eb936b5a
 +def STINDW : EclipsePseudo<(outs), (ins GPR:$src, GPR:$base, GPR:$off), "# STINDW",
 +                            [(store GPR:$src, (EclipseWordAdd GPR:$base, GPR:$off))]>;
 +}
-+def : Pat<(i16 (extloadi8  (EclipseWordAdd GPR:$base, GPR:$off))), (LDINDW GPR:$base, GPR:$off)>;
-+def : Pat<(i16 (sextloadi8 (EclipseWordAdd GPR:$base, GPR:$off))), (LDINDW GPR:$base, GPR:$off)>;
-+def : Pat<(i16 (zextloadi8 (EclipseWordAdd GPR:$base, GPR:$off))), (LDINDW GPR:$base, GPR:$off)>;
-+def : Pat<(truncstorei8 GPR:$src, (EclipseWordAdd GPR:$base, GPR:$off)), (STINDW GPR:$src, GPR:$base, GPR:$off)>;
++
 +
 +//===----------------------------------------------------------------------===//
 +// Software stack (a plain page-zero memory word, `_SP`, manipulated with
@@ -5961,10 +5557,10 @@ index 000000000..9ffc1c1fc
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSEMACHINEFUNCTIONINFO_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseRegisterInfo.cpp b/llvm/lib/Target/Eclipse/EclipseRegisterInfo.cpp
 new file mode 100644
-index 000000000..badfee11c
+index 000000000..e731db0bc
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseRegisterInfo.cpp
-@@ -0,0 +1,240 @@
+@@ -0,0 +1,245 @@
 +//===-- EclipseRegisterInfo.cpp - Eclipse Register Information ----------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -6059,6 +5655,11 @@ index 000000000..badfee11c
 +    BuildMI(MBB, MI, DL, TII.get(Eclipse::MOVrr), Dst).addReg(Eclipse::AC2);
 +    BuildMI(MBB, MI, DL, TII.get(Eclipse::ADDrr), Dst)
 +        .addReg(OffReg)
++        .addReg(Dst);
++    // FP + Offset is a word address; an address-of-local is a pointer
++    // VALUE, which is a byte address (DEBUGGING_NOTES.md #38): double it.
++    BuildMI(MBB, MI, DL, TII.get(Eclipse::ADDrr), Dst)
++        .addReg(Dst)
 +        .addReg(Dst);
 +    MI.eraseFromParent();
 +    return true; // MI is gone; caller must not touch it further.

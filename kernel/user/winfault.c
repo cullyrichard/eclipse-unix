@@ -5,7 +5,7 @@
 #include "../usys.h"
 
 int main(void) {
-    volatile unsigned int *w = (volatile unsigned int *)060000; /* page 24 */
+    volatile unsigned int *w = (volatile unsigned int *)0140000; /* byte addr of word 060000: page 24 */
     sys_segalloc(1);
     sys_mapwin(24, 0, 1);
     *w = 4321;

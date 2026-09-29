@@ -454,3 +454,6 @@ performance measure.
 - Segments aren't shared between processes, and there is no
   `SEGFREE`/shrink; frames come back only at exit.
 - Not tested on real hardware.
+
+
+**Update:** `char` arrays work now: pointer values are byte addresses and chars pack two per word (DEBUGGING_NOTES.md #38). `SYS_WRITE` takes an ordinary `char` buffer, and absolute word addresses in user code are written as byte addresses (`(int *)0160000` is word 070000).

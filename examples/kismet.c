@@ -141,7 +141,7 @@ static unsigned int kismet_seek_and_xfer(int unit, int cmd, int cyl, int head,
            (count_low5 & 037u);
     dskp_doc(doc2); /* bare: Specify Head, Sector and Count (2nd) */
 
-    dob = (unsigned int)(unsigned long)buf & 077777u;
+    dob = ((unsigned int)(unsigned long)buf >> 1) & 077777u; /* pointer values are byte addresses (DEBUGGING_NOTES.md #38); DMA wants the word address */
     dskp_dobs_start(dob); /* S pulse: sets mem addr AND starts the
                             * read/write, then polls SKPDN DSKP to
                             * completion */

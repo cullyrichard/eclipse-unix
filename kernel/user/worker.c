@@ -15,7 +15,7 @@
 int marker[NMARK];
 
 static void put_u(unsigned int v) {
-    int buf[6];         /* int, not char: see KERNEL_NOTES.md */
+    char buf[6];
     int n = 0;
     do { buf[n] = '0' + v % 10; n++; v = v / 10; } while (v != 0);
     while (n > 0) { n--; sys_putchar(buf[n]); }
@@ -25,7 +25,7 @@ int main(void) {
     int pid = sys_getpid();
     unsigned int i, round, pass, errs = 0;
     unsigned int sum, expect;
-    int tag[4];         /* one char per word, as SYS_WRITE expects */
+    char tag[4];
 
     expect = 0;
     for (i = 0; i < NMARK; i++) {
@@ -45,11 +45,11 @@ int main(void) {
              * restore (registers or carry) shows up here */
             if (sum != expect) errs++;
         }
-        sys_write((const char *)tag, 4);          /* user buffer copied in by the kernel */
+        sys_write(tag, 4);          /* user buffer copied in by the kernel */
         put_u(round);
         sys_putchar(' ');
     }
-    sys_write((const char *)tag, 3);
+    sys_write(tag, 3);
     sys_putchar('e'); sys_putchar('=');
     put_u(errs);
     sys_putchar(' ');

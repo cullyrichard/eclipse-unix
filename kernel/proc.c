@@ -278,15 +278,23 @@ static void kill_cur(const char *why) {
     sched();
 }
 
+/* buf is a BYTE address (DEBUGGING_NOTES.md #38: pointer values are byte
+ * addresses and chars are packed two per word, high byte first), so byte
+ * b lives in word b>>1, in the high half when b is even. */
 static int sys_write_user(unsigned int buf, unsigned int len) {
-    unsigned int i, a, pt0;
+    unsigned int i, b, w, pt0;
+    if (len == 0) return 0;
+    if (buf + (len - 1) < buf) return -1;       /* wraps past 0177777 */
     pt0 = (unsigned int)curproc * NPAGES;
     for (i = 0; i < len; i++) {
-        a = buf + i;
-        if (a > 077777 || !pte_valid(p_pt[pt0 + (a >> 10)])) return -1;
+        w = (buf + i) >> 1;
+        if (!pte_valid(p_pt[pt0 + (w >> 10)])) return -1;
     }
-    for (i = 0; i < len; i++)
-        console_putchar((int)(kcopyin_word(buf + i) & 0377));
+    for (i = 0; i < len; i++) {
+        b = buf + i;
+        w = kcopyin_word(b >> 1);
+        console_putchar((int)((b & 1) ? (w & 0377) : ((w >> 8) & 0377)));
+    }
     return (int)len;
 }
 

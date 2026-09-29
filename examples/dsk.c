@@ -38,7 +38,7 @@ int dsk_read_block(unsigned int blockno, unsigned int *buf) {
         return -1;
 
     dsk_set_blockaddr(blockno);
-    dsk_set_memaddr((unsigned int)(unsigned long)buf);
+    dsk_set_memaddr((unsigned int)(unsigned long)buf >> 1); /* pointer values are byte addresses (DEBUGGING_NOTES.md #38); DMA wants the word address */
 
     /* NIOS: pulse S, starts a READ (disk block -> buf). Separate bare
      * instruction, not combined with the DOB above -- see this file's
@@ -69,7 +69,7 @@ int dsk_write_block(unsigned int blockno, unsigned int *buf) {
         return -1;
 
     dsk_set_blockaddr(blockno);
-    dsk_set_memaddr((unsigned int)(unsigned long)buf);
+    dsk_set_memaddr((unsigned int)(unsigned long)buf >> 1); /* pointer values are byte addresses (DEBUGGING_NOTES.md #38); DMA wants the word address */
 
     /* NIOP: pulse P, starts a WRITE (buf -> disk block). Fixed label,
      * same reason as dsk_read_block's wait loop above. */
