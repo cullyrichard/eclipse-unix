@@ -12,7 +12,9 @@ explicitly left open: *does a syscall trap taken while
 `scheduler_probe.s`'s PIT timer is armed interact safely with the
 scheduler's own preemption logic?*
 
-**Bottom line, stated up front**: **no.** The syscall ABI itself works
+**Update: fixed and verified. See section 7** (interrupts masked for the handler's duration; exhaustive injection sweep: 0/130 corrupt post-fix vs 56/130 pre-fix). The original finding follows.
+
+**Bottom line, stated up front** (pre-fix): **no.** The syscall ABI itself works
 correctly end to end (real console I/O, real block I/O, a real
 compiled user-mode C wrapper library, all exercised through the actual
 toolchain and a real SIMH run). But composing it with
@@ -605,3 +607,68 @@ valgrind still not installed) — identical to every prior phase's
 baseline. `examples/syscall_test.c`'s own full run (section 2) was
 re-confirmed a second time, byte-identical, immediately before writing
 this document.
+
+## 7. The fix, and its verification (commit `776fbe7` + this section)
+
+**Fix** (`examples/syscall_entry.s`, mirrored into
+`examples/syscall_sched_race_probe.s`'s copy of the handler): `NIOC 077`
+(INTDS) is `__syscall_handler`'s first instruction, and `NIOS 077`
+(INTEN) comes immediately before `POPB`. That masks every device
+interrupt for the handler's whole duration, which covers the whole
+window in which `MapStat` bit 0 reads 0. INTEN's documented "one more
+instruction before the first I/O interrupt" guarantees `POPB` completes
+first, so a PIT tick that arrives during the syscall is deferred to the
+first instruction back in user mode, not lost. Neither `INTHANDLER` nor
+the TCB layout changed. The derivation (DG 014-000642-02 pp.5-77/78,
+`eclipse_cpu.c`'s `DEV_CPU` case) is in `syscall_entry.s`'s header.
+
+**Verification: `examples/syscall_race_sweep.py`.** An exhaustive
+injection sweep, not a single spot check. For each k = 1..130, one
+ordinary preemption (A->B) is followed by a second deterministic PIT
+injection k instructions into B's run. That walks the second injection
+across every instruction of B's `user_loop`, its `SYC`, all of
+`__syscall_handler` (`0377`-`0425`), the `syscall_dispatch` stand-in
+(`0441`-`0454`), and into later iterations. Each run then goes to the
+probe's own 6th-syscall `HALT`, and both TCBs are checked against the
+per-process invariants (see the script header). The same sweep was run
+against the pre-fix probe (`git show 73e8f7e:examples/syscall_sched_race_probe.s`)
+as a control.
+
+```
+post-fix: corrupt runs: 0   (130 runs; 55 with the 2nd injection inside
+                             the handler/dispatch; B made progress in 72)
+pre-fix:  corrupt runs: 56  (every injection inside the handler/dispatch)
+
+pre-fix, e.g.:
+k= 65 inj@00377 HALT itA=1 itB=0 CORRUPT A.ac2=7 A.ac1=6007!=2000+3*1 A.pc=401 A.mapstat=4
+post-fix, same k:
+k= 65 inj@00377 HALT itA=1 itB=1 OK
+```
+
+The pre-fix control reproduces section 3's Experiment 2 signature
+exactly at every in-handler point: B's registers are written into A's
+TCB, `mapstat=4`, and the saved PC points inside the handler. With the
+fix, the deferred tick is delivered at the first user-mode instruction
+after `POPB`, and both processes' saved state is correct.
+`inj@00377` is the PC sitting on the `NIOC 077` itself. That is the
+instruction immediately after `SYC`, still inside `SYC`'s own `Inhibit`
+window, and it is covered too.
+
+One checker false positive came up during bring-up and was
+corrected rather than hidden. A preemption saved at `0113`, between
+`INC 3,3` and `ADD 2,1`, legitimately has the running sum one step
+behind the iteration count. The first version of the checker flagged
+two such runs as corrupt. The checker now accounts for that PC.
+
+**Costs and limits of this fix, still open:**
+- **No preemption during a syscall.** A syscall that blocks
+  (`SYS_GETCHAR` polling TTI, `dsk_*` polling Busy/Done) freezes the
+  whole machine until it completes. That is acceptable for now, but a
+  real kernel needs interrupt-driven I/O with sleep/wakeup (block the
+  caller, let the scheduler run the other process) before blocking
+  syscalls and multiprogramming really coexist.
+- Deterministic injection only. No long real-timer soak was run (same
+  scope as section 4).
+- Nested `SYC` is now structurally prevented from being *interrupt*-
+  induced (no preemption can land mid-handler), but a handler that
+  itself executes `SYC` is still unsupported.
