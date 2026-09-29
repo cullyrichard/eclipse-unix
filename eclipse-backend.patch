@@ -4588,10 +4588,10 @@ index 000000000..c7b0873e1
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseInstrInfo.cpp b/llvm/lib/Target/Eclipse/EclipseInstrInfo.cpp
 new file mode 100644
-index 000000000..c06095bbe
+index 000000000..b59aedd21
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseInstrInfo.cpp
-@@ -0,0 +1,308 @@
+@@ -0,0 +1,333 @@
 +//===-- EclipseInstrInfo.cpp - Eclipse Instruction Information ----------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -4841,6 +4841,27 @@ index 000000000..c06095bbe
 +      .addReg(Eclipse::AC2)
 +      .addImm(HWStackAddr);
 +
++  // MULrr/UDIVrr/UREMrr declare a single output ($dst), but the hardware
++  // sequence below overwrites BOTH allocatable GPRs (AC0 and AC1) -- and
++  // they cannot be declared as clobbered (see EclipseInstrInfo.td's Defs
++  // comment: that makes allocation impossible with a 2-register pool). So
++  // the GPR that is NOT $dst may hold a value the allocator still
++  // considers live afterwards -- e.g. a divisor constant it reuses for
++  // the next divide. Found via kernel/proc.c: `(a+b-1)>>10` followed by
++  // `c>>10` divided c by the FIRST quotient (0) instead of 1024,
++  // returning c unchanged; `a*3` then `b*3` had the same shape for MUL.
++  // Preserve it on the hardware stack, exactly like AC2 above, and
++  // restore it after the result has been moved into $dst. (UDIVREMrr
++  // declares both GPRs as outputs, so it has nothing to preserve.)
++  Register Other;
++  if (!IsDivRem) {
++    Other = (Dst == Eclipse::AC0) ? Eclipse::AC1 : Eclipse::AC0;
++    BuildMI(MBB, MI, DL, get(Eclipse::ISZABS)).addImm(HWStackAddr);
++    BuildMI(MBB, MI, DL, get(Eclipse::STABSI))
++        .addReg(Other)
++        .addImm(HWStackAddr);
++  }
++
 +  // NB: must be real MOVrr, not TargetOpcode::COPY — these are inserted
 +  // *before* the loop's current position in ExpandPostRAPseudos, so a
 +  // generic COPY placed here would never get revisited for lowering and
@@ -4893,6 +4914,10 @@ index 000000000..c06095bbe
 +    BuildMI(MBB, MI, DL, get(Eclipse::MOVrr), Dst).addReg(Result);
 +  }
 +
++  if (!IsDivRem) {
++    BuildMI(MBB, MI, DL, get(Eclipse::LDABSI), Other).addImm(HWStackAddr);
++    BuildMI(MBB, MI, DL, get(Eclipse::DSZABS)).addImm(HWStackAddr);
++  }
 +  BuildMI(MBB, MI, DL, get(Eclipse::LDABSI), Eclipse::AC2)
 +      .addImm(HWStackAddr);
 +  BuildMI(MBB, MI, DL, get(Eclipse::DSZABS)).addImm(HWStackAddr);

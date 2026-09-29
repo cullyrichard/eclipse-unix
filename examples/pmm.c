@@ -12,7 +12,7 @@
  * spend that risk to save under a kiloword of RAM -- plain
  * byte-per-frame array. freemap[i] != 0 means frame i is free.
  */
-static unsigned char freemap[PMM_NUM_FRAMES];
+static unsigned int freemap[PMM_NUM_FRAMES];  /* int, not char: see PMM_NOTES.md section 6 */
 
 void pmm_init(void) {
     int i;

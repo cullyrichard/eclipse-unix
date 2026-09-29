@@ -1,0 +1,83 @@
+From 1c22ef92ac40cf70a32b3957f22a81b1ddb5c3e5 Mon Sep 17 00:00:00 2001
+From: Cully Richard <cully.j.richard@gmail.com>
+Date: Tue, 29 Sep 2026 18:23:09 -0400
+Subject: [PATCH] Reject signed 8-bit displacements of +128..+255
+
+get_short_displacement's range check for PC/AC2/AC3-relative operands only
+rejected values whose high byte was neither 0x00 nor 0xFF, so +128..+255
+were accepted and encoded as -128..-1: `JMP .+128` silently became
+`JMP .-128`. Found when a C loop back-edge exactly 128 words away jumped
+into the middle of unrelated code. Check the signed value directly and
+add error tests for +128, -129 and an AC2-relative 128. ctest: 317/318
+(memcheck_hello Not Run, no valgrind), unchanged apart from the 3 new
+passing tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ CMakeLists.txt                    | 3 +++
+ opcode.c                          | 5 ++++-
+ tests/golden/error_disp_ac2_128.s | 2 ++
+ tests/golden/error_disp_neg129.s  | 2 ++
+ tests/golden/error_disp_pos128.s  | 2 ++
+ 5 files changed, 13 insertions(+), 1 deletion(-)
+ create mode 100644 tests/golden/error_disp_ac2_128.s
+ create mode 100644 tests/golden/error_disp_neg129.s
+ create mode 100644 tests/golden/error_disp_pos128.s
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a5fa3bb..1544fde 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -133,6 +133,9 @@ add_golden_error_test(error_eom_string_packed)
+ add_golden_error_test(error_eom_int)
+ add_golden_error_test(error_eom_resv)
+ add_golden_error_test(error_cyclic_definition)
++add_golden_error_test(error_disp_pos128)
++add_golden_error_test(error_disp_neg129)
++add_golden_error_test(error_disp_ac2_128)
+ 
+ add_golden_nova1_test(mov)
+ add_golden_nova1_test(add)
+diff --git a/opcode.c b/opcode.c
+index c151ccc..fcee2b3 100644
+--- a/opcode.c
++++ b/opcode.c
+@@ -458,7 +458,10 @@ uint16_t get_short_displacement(statement_t* opcode_stmt, symboltbl_t* symbols,
+   // If index is 0 (ie, zero page), the number is unsigned. Elsewise, it's signed
+   if (index == 0 && (displacement & 0xFF00) != 0) {
+     report_error(opcode_stmt, "Address out of range. Got %d, should be 0 - 255", (int16_t)displacement);
+-  } else if (index != 0 && (displacement & 0xFF00) != 0 && (displacement & 0xFF80) != 0xFF80) {
++  } else if (index != 0 && ((int16_t)displacement < -128 || (int16_t)displacement > 127)) {
++    // Signed 8-bit range. The previous check only rejected values whose
++    // high byte was neither 0x00 nor 0xFF, so +128..+255 slipped through
++    // and were encoded as -128..-1 (e.g. `JMP .+128` became `JMP .-128`).
+     report_error(opcode_stmt, "Address out of range. Got %d, should be -128 - 127", (int16_t)displacement);
+   }
+ 
+diff --git a/tests/golden/error_disp_ac2_128.s b/tests/golden/error_disp_ac2_128.s
+new file mode 100644
+index 0000000..5c2f8e7
+--- /dev/null
++++ b/tests/golden/error_disp_ac2_128.s
+@@ -0,0 +1,2 @@
++	// AC2-relative displacement 128 is out of range (signed 8-bit)
++	LDA 0, 128, 2
+diff --git a/tests/golden/error_disp_neg129.s b/tests/golden/error_disp_neg129.s
+new file mode 100644
+index 0000000..5476915
+--- /dev/null
++++ b/tests/golden/error_disp_neg129.s
+@@ -0,0 +1,2 @@
++	// PC-relative displacement -129 is out of range (signed 8-bit)
++	JMP .-129, 1
+diff --git a/tests/golden/error_disp_pos128.s b/tests/golden/error_disp_pos128.s
+new file mode 100644
+index 0000000..4ea8f4b
+--- /dev/null
++++ b/tests/golden/error_disp_pos128.s
+@@ -0,0 +1,2 @@
++	// PC-relative displacement +128 is out of range (signed 8-bit)
++	JMP .+128, 1
+-- 
+2.55.0
+

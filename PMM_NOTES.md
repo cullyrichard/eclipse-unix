@@ -309,3 +309,31 @@ practice:
   keep this increment's scope matched to what was actually asked for
   (single-frame alloc/free) and verifiable the same rigorous way as
   everything else in this project.
+
+## 6. Correction: `freemap` was a `char` array, and the compiler put it in the wrong place
+
+Found while bringing up the N-process kernel (KERNEL_NOTES.md). The kernel
+jumped into data the first time it called `console_putchar`, and that
+function's first word read back `000001`. Bisecting on when that word
+changed landed on `pmm_init`'s loop. Diffing all of memory after
+`pmm_init` showed its 992 `1`s written to `04237`-`06151`, straight over
+the kernel's code. `freemap` itself was reserved correctly (992 words, far
+higher up).
+
+The cause is the backend, not this allocator. For a zero-initialized
+global `unsigned char` array indexed at runtime, the generated code
+divides the array's *base address* by 2 (`ELEF 1,freemap` ... `DIV` by a
+`CPI = 2`) and then adds the index. See DEBUGGING_NOTES.md #37.
+
+**Fix**: `freemap` is now `unsigned int[PMM_NUM_FRAMES]`. That's a word
+array, a path with no halving, and the same one-word-per-flag storage
+dgasm already gave the `char` version.
+
+**What this means for section 4's evidence**: its allocator-behavior
+claims were never wrong. The program read and wrote the same (wrong)
+addresses consistently, so first-fit, reuse, exhaustion and recovery all
+behaved as documented. But the flags lived on top of something else, and
+`pmm_test.c` happened not to execute anything it had overwritten. Re-run
+now with the fix and the fixed toolchain: the output is byte-identical to
+section 4's transcript (compared with carriage returns stripped), including
+the `e 100000` / `e 102000` physical-frame checks (`001750`, `011611`).

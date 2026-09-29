@@ -168,8 +168,17 @@ STRING_LIT_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"')
 # corrupted that data (c-testsuite 00150 regressed exactly this way when
 # the backend started emitting these instructions -- see
 # DEBUGGING_NOTES.md).
+#
+# Not only the E* family: SAVE is 2 words too (the frame size is its second
+# word -- `SAVE 6` assembles to 163710 000006), as are DSPA, PSHJ, the
+# immediate ALU forms (ADDI/ANDI/IORI/XORI) and the FPU memory-reference
+# forms. The list below is every Eclipse S/140 entry in dgasm's opcode.c
+# with size 2 (extracted mechanically, KERNEL_NOTES.md). Missing SAVE
+# undercounted every function by one word.
 EXTENDED_INSN_RE = re.compile(
-    r"^\s*(EJSR|EJMP|ELEF|ELDA|ESTA|EISZ|EDSZ|ELDB|ESTB)\b")
+    r"^\s*(EJSR|EJMP|ELEF|ELDA|ESTA|EISZ|EDSZ|ELDB|ESTB|SAVE|DSPA|PSHJ"
+    r"|ADDI|ANDI|IORI|XORI|FAMD|FAMS|FDMD|FDMS|FFMD|FLDD|FLDS|FLMD|FLST"
+    r"|FMMD|FMMS|FSMD|FSMS|FSST|FSTD|FSTS)\b")
 
 
 def dgasm_number(tok: str) -> int:
@@ -267,10 +276,16 @@ def relax_long_jumps(text: str) -> str:
             indent, target = m.groups()
             if target not in label_addr:
                 continue
-            # PC-relative displacement is relative to the word *after*
-            # the JMP itself (confirmed by the exact -128..127 boundary
-            # dgasm's own "Address out of range" errors report).
-            disp = label_addr[target] - (line_addr[i] + 1)
+            # PC-relative displacement is relative to the JMP's OWN
+            # address: dgasm's get_short_displacement does
+            # `displacement -= offset` (offset = this instruction's
+            # address), and eclipse_cpu.c resolves `JMP 167` at 0367 with
+            # displacement 0200 (-128) to 0167. An earlier version of this
+            # measured from the word after the JMP, so a +128 jump looked
+            # like +127 and was left short -- and dgasm (before its own
+            # range-check fix) silently encoded +128 as -128. Found via
+            # kernel/user/worker.c's loop back-edge (KERNEL_NOTES.md).
+            disp = label_addr[target] - line_addr[i]
             if -128 <= disp <= 127:
                 continue
             slot = target + "_SLOT"

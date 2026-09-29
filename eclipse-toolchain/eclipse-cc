@@ -2,7 +2,17 @@
 # eclipse-cc: compile one or more C source files to a runnable dgasm/
 # eclipseemu program for the Data General Nova/Eclipse LLVM backend.
 #
-# Usage: eclipse-cc [-o out.simh] [--ieee] [--hwfloat] file.c [file.c ...]
+# Usage: eclipse-cc [-o out.simh] [--ieee] [--hwfloat] [-DNAME[=V]] [-Idir]
+#                   file.c|file.s [...]
+#
+# -D/-I (joined form only) are passed straight to clang -cc1.
+#
+# A `.s` source is hand-written Eclipse assembly: it is not compiled, but
+# appended verbatim onto llc's output before reorder_asm.py runs -- the
+# same place/mechanism rt/eclipse_hwfloat.s uses (SYSCALL_NOTES.md
+# section 2 documents the manual version of this recipe). C globals and
+# functions referenced only from a `.s` file are found and protected from
+# globaldce by the same "Undefined symbol" retry loop below.
 #
 # As of DEBUGGING_NOTES.md entry #30, this target's DEFAULT (no flags at
 # all) is DG hardware-accelerated float: real Eclipse S/140 FPU
@@ -68,11 +78,15 @@ out="a.simh"
 hwfloat=0
 ieee=0
 sources=()
+asm_sources=()
+cpp_flags=()
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     --hwfloat) hwfloat=1; shift ;;
     --ieee) ieee=1; shift ;;
+    -D?*|-I?*) cpp_flags+=("$1"); shift ;;
+    *.s) asm_sources+=("$1"); shift ;;
     *) sources+=("$1"); shift ;;
   esac
 done
@@ -142,7 +156,8 @@ compile_one() {
   "$CLANG" -cc1 -triple "$TRIPLE" -nostdsysteminc \
     -isystem "$RESOURCE_DIR/include" \
     -I "$SCRIPT_DIR/rt/include" -I "$SCRIPT_DIR/rt" \
-    "${cc1_float_flags[@]}" \
+    ${cc1_float_flags[@]+"${cc1_float_flags[@]}"} \
+    ${cpp_flags[@]+"${cpp_flags[@]}"} \
     -emit-llvm "$src" -o "$ll"
   ll_files+=("$ll")
 }
@@ -223,8 +238,18 @@ build_and_assemble() {
     cat "$HWFLOAT_SRC" >> "$asm"
   fi
 
+  local a
+  for a in ${asm_sources[@]+"${asm_sources[@]}"}; do
+    cat "$a" >> "$asm"
+  done
+
   local reordered="$work/out_r.s"
   python3 "$REORDER" "$asm" "$reordered"
+  # ECLIPSE_CC_KEEP_ASM=path: keep the exact assembly dgasm is given
+  # (for mapping addresses back to code while debugging).
+  if [ -n "${ECLIPSE_CC_KEEP_ASM:-}" ]; then
+    cp "$reordered" "$ECLIPSE_CC_KEEP_ASM"
+  fi
 
   dgasm -t eclipse_s140 -f simh -o "$out" "$reordered"
 }

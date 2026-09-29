@@ -4054,3 +4054,102 @@ S/140 assumptions.
 `--ieee`/`--hwfloat` flag parsing/forwarding; no other behavior
 changed). New diagnostics: `mandel240_diag5.c`, `test_hwfloat_minimal.c`,
 `test_hwfloat_bits.c`. No compiler/backend file touched.
+
+### 35. `MULrr`/`UDIVrr`/`UREMrr` silently destroyed whichever GPR wasn't `$dst` (fixed)
+
+**Symptom** (kernel/proc.c, then a minimal repro): `x = (a+b-1) >> 10;
+y = c >> 10;` gave `y == c`. And `p = a*3; q = b*3; return p*100+q;` with
+`a=7, b=11` returned 2331 instead of 2133.
+
+**Cause**: an unsigned `>> 10` is lowered to `UDIVrr` by 1024. The
+post-RA expansion (`EclipseInstrInfo.cpp`) moves RHS→AC2, LHS→AC1,
+zeroes AC0, and runs `DIV`, which leaves the quotient in AC1 and the
+remainder in AC0. So both allocatable GPRs are overwritten, but the pseudo
+declares only `$dst`. The .td comment explains why the other one can't be
+declared: with a 2-register pool, allocation becomes impossible. When
+`$dst` was AC0, the allocator still believed AC1 held the divisor 1024,
+and reused it for the next divide. It had actually become the first
+quotient (0), and Nova `DIV` by zero leaves the dividend unchanged. `MULrr`
+has the same shape. Entry #28 fixed the quotient-plus-remainder case by
+introducing `UDIVREMrr`, which declares both outputs; single-output uses
+were still exposed.
+
+**Fix**: the expansion now pushes the non-`$dst` GPR onto the hardware
+stack right after AC2, and pops it after the result is moved into `$dst`.
+This is the same mechanism, and the same safety argument, as the existing
+AC2 save. `UDIVREMrr` is unchanged (nothing to preserve).
+
+**Verified**: the repro gives `x=0 y=4 z=5` and `g=2133`. Full
+c-testsuite, measured with a new runner (`eclipse-toolchain/
+run-c-testsuite.sh`; the earlier runner no longer exists, so compare its
+runs with each other, not with the historical 197): **199 → 201** in both
+`--ieee` and default mode. The newly passing tests are exactly `00157` and
+`00163`, with no regressions (diffed test by test, with a baseline `llc`
+rebuilt from the pre-fix source). llvm-project commit `851884a68`;
+`eclipse-backend.patch` regenerated.
+
+### 36. `JMP` exactly +128 words away was encoded as −128: two tools, one off-by-one each (fixed)
+
+**Symptom** (kernel/user/worker.c, once it grew past one page): after its
+last round, every worker ran its loop with AC2 (the frame pointer) = 0,
+then jumped to location 0. The trace showed `JMP 167` executed at `0367`,
+into the pop tail of an unrelated expansion.
+
+**Cause 1, dgasm**: `get_short_displacement` computes
+`displacement -= offset`, so the displacement is relative to the
+instruction itself. That's correct: `eclipse_cpu.c` resolved `0367` +
+(−128) to `0167`. But its signed range check only rejected values whose
+high byte was neither `0x00` nor `0xFF`, so +128..+255 were accepted and
+encoded as −128..−1. Fixed to a true −128..127 check. Three new error
+tests: +128, −129, AC2-relative 128. ctest 317/318 (`memcheck_hello` Not
+Run, no valgrind). Committed locally in `~/dev/dgasm-src` (`1c22ef9`,
+someone else's project); a copy is in `dgasm-displacement-range.patch`.
+
+**Cause 2, reorder_asm.py `relax_long_jumps`**: it measured the
+displacement from the word *after* the `JMP`. Its comment claimed this was
+"confirmed by the exact −128..127 boundary dgasm's own errors report", but
+dgasm never reported +128, so that confirmation couldn't have caught this.
+A +128 jump looked like +127 and was left short. Now measured from the
+`JMP` itself.
+
+**Cause 3, same file, found alongside**: `compute_addresses` sized `SAVE`
+(and `DSPA`, `PSHJ`, `ADDI`/`ANDI`/`IORI`/`XORI`, the FPU memory forms)
+as 1 word. dgasm's opcode table has them as 2: `SAVE 6` is `163710 000006`.
+That undercounted by one word per function. It didn't cause this bug,
+because a function's jumps and targets all sit after its own `SAVE`. But
+it skews `fix_stack_pointer`'s end-of-program estimate and any cross-function
+distance. The list is now every size-2 Eclipse entry in dgasm's opcode.c,
+checked mechanically for equality.
+
+**Verified**: the worker completes and exits (KERNEL_NOTES.md §6).
+c-testsuite unchanged at 201 in both modes, with the identical per-test set.
+
+### 37. `char` arrays: three distinct miscompiles (open; worked around)
+
+Minimal repro, `--ieee`:
+
+```c
+unsigned char gz[8];        char gs[8] = "abcdefg";     /* globals */
+... char loc[4]; for (i = 0; i < 4; i++) loc[i] = 'w' + i;  volatile int k = 3;
+gz=3776 &gz[k]=3777 gz[k]=7          <- offset halved (3 -> 1)
+gs=3766 gs[k]=                       <- should be 'd'
+loc=14170 &loc[1]=14170 &loc[3]=14171 w0=74170 w1=75000   <- packed 2/word, writes collide ('x','x')
+```
+
+1. **Zero-initialized global `char` array, runtime index**: the index is
+   halved. In `pmm.c`'s code shape, the *base address* was halved instead
+   (PMM_NOTES.md §6). dgasm stores these one per word (`var name_elemN =
+   0`), so no halving is correct.
+2. **String-initialized global, runtime index**: misreads. Entry #12
+   exempted string constants from the HALVE combine, but this repro still
+   fails; not yet investigated.
+3. **Local `char` arrays**: the frame allocator packs two per word (entry
+   #12 already noted this). The stores collide: `'x'` twice in one word,
+   and `'w'` lost.
+
+Pointers are word addresses throughout (`&iarr[1]-&iarr[0] == 1`,
+`&carr[1]-&carr[0] == 1`), so the "one character per word" layout is the
+consistent one. The packed-local and halved-offset paths disagree with it.
+**Workaround in use**: `kernel/` and `kernel/user/` keep characters in
+`int` arrays; string literals walked with `s++` work, as in every existing
+driver. **Must be fixed before the filesystem**, which is all byte strings.
