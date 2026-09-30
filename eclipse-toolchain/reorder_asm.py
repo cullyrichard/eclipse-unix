@@ -38,6 +38,7 @@ that end address matters.
 Usage: reorder_asm.py < in.s > out.s
    or: reorder_asm.py in.s out.s
 """
+import os
 import re
 import sys
 
@@ -257,6 +258,37 @@ def _data_block_end(lines) -> int:
     return last
 
 
+SKIP_FIELDS = {"SKP", "SZC", "SNC", "SZR", "SNR", "SEZ", "SBN"}
+ALU_RE = re.compile(r"^(COM|NEG|MOV|INC|ADC|SUB|ADD|AND)[ZOC]?[LRS]?#?$")
+# Mnemonics that never skip. Anything not listed here (ISZ/DSZ/EISZ/EDSZ,
+# SKP*, SGT/SGE, SZB/SNB, FP compares, ...) is treated as possibly skipping.
+NO_SKIP = {"LDA", "STA", "ELDA", "ESTA", "ELEF", "LEF", "EJSR", "JSR", "JMP",
+           "EJMP", "LDB", "STB", "SAVE", "RTN", "POPB", "MUL", "DIV", "HALT",
+           "LMP", "ADI", "SBI", "HXL", "HXR", "LSH", "DLSH"}
+
+
+def _prev_insn(lines, i):
+    """The instruction statement textually before line i (labels, vars,
+    comments and blank lines skipped), or None."""
+    for j in range(i - 1, -1, -1):
+        st = lines[j].split("//", 1)[0].strip()
+        if not st or LABEL_RE.match(st) or VAR_DECL_RE.match(lines[j]) \
+                or DEV_RE.match(lines[j]) or ORG_RE.match(lines[j]):
+            continue
+        return st
+    return None
+
+
+def _cannot_skip(insn) -> bool:
+    if insn is None:
+        return False
+    parts = insn.replace(",", " ").split()
+    op = parts[0]
+    if any(p in SKIP_FIELDS for p in parts[1:]):
+        return False
+    return op in NO_SKIP or bool(ALU_RE.match(op))
+
+
 def relax_long_jumps(text: str) -> str:
     lines = text.splitlines()
     declared_slots = {
@@ -287,6 +319,16 @@ def relax_long_jumps(text: str) -> str:
             # kernel/user/worker.c's loop back-edge (KERNEL_NOTES.md).
             disp = label_addr[target] - line_addr[i]
             if -128 <= disp <= 127:
+                continue
+            # Out of range. If the instruction before this JMP cannot
+            # skip, use EJMP (2 words, 15-bit absolute, no page-zero
+            # slot). After a skip it must stay one word: a skip advances
+            # PC by exactly one word (eclipse_cpu.c `PC = PC + 1`), so it
+            # would land in the middle of a 2-word EJMP. Page zero is
+            # only 256 words and ran out in the merged kernel.
+            if _cannot_skip(_prev_insn(lines, i)):
+                lines[i] = f"{indent}EJMP {target},0"
+                changed = True
                 continue
             slot = target + "_SLOT"
             lines[i] = f"{indent}JMP @{slot},0"
@@ -451,6 +493,7 @@ def dedup_constants(text: str) -> str:
 # of silently emitting an invalid or wrapped address — on the pathological
 # case of a program whose own data nearly fills the address space outright.
 
+LOGICAL_TOP = 0o100000  # 32768: one past the highest logical word address
 STACK_MARGIN = 4096  # words of headroom between the program's own highest
                       # data address and _STACKTOP — see this section's
                       # comment for why this is generous.
@@ -466,11 +509,28 @@ def fix_stack_pointer(text: str) -> str:
     lines = text.splitlines()
     _label_addr, _line_addr, end_addr = compute_addresses(lines)
 
-    new_sp = end_addr + STACK_MARGIN
+    margin = int(os.environ.get("ECLIPSE_STACK_WORDS", STACK_MARGIN))
+    new_sp = end_addr + margin
+    # The stack must also fit under the 32KW LOGICAL ceiling: addresses
+    # are 15 bits, so a _STACKTOP past 077777 wraps to low memory and the
+    # stack grows over the program's own code. STACK_LIMIT (_STACKLIM,
+    # 0177700) is a 16-bit value and never caught that -- found when the
+    # merged kernel (30218 words + 4096) got _STACKTOP 0103012 and its
+    # boot stack overwrote code at 03410 (KERNEL_NOTES.md merge section).
+    if new_sp > LOGICAL_TOP:
+        print(
+            f"reorder_asm.py: program ends at {end_addr} ({end_addr:#o}); "
+            f"a {margin}-word stack above it would pass the 32KW logical "
+            f"ceiling ({LOGICAL_TOP:#o}) and wrap into low memory. Shrink "
+            "the program, or set ECLIPSE_STACK_WORDS to a smaller stack "
+            "if the program provably needs less.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if new_sp >= STACK_LIMIT:
         print(
             f"reorder_asm.py: program data extends to address {end_addr} "
-            f"({end_addr:#o}) — placing the stack {STACK_MARGIN} words "
+            f"({end_addr:#o}) — placing the stack {margin} words "
             f"above it would reach or exceed _STACKLIM ({STACK_LIMIT:#o}), "
             "the hardware stack's own ceiling. This program is too large "
             "for the stack to fit safely; shrink it (fewer linked runtime "

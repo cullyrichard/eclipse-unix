@@ -274,3 +274,26 @@ controller has one.
   now ends at 064305 (26821 words) of its 32768-word window.
 - Real hardware: TTI/DSK interrupt behavior is emulator-verified only.
   The DSKP-family drivers are still not behind this path.
+
+## Addendum: re-verified on the merged kernel (KERNEL_NOTES.md §10)
+
+After merging with the shell branch (pipes now sleep with `ksleep`, fs
+lock only for calls that reach `fs.c`):
+
+```
+console wait: ttyread got 6 bytes: hello; 339 dots printed while it was
+              blocked (4000-dot spinner; input sent 3M instructions after
+              "<ttyread: waiting>")
+disk overlap: 414 and 406 dots before <IO DONE> (fswriter errs=0)
+              (this branch alone: 344/303; 20c6bf5: 234/241)
+io_boundary:  TTI injected at each ION-enable instruction, 1st-5th hit: 0 bad runs
+```
+
+Harness note: the delayed-input recipe that works is an `expect`-triggered
+send, e.g. `expect "waiting>" send after=3000000,"hello\r"; continue`
+before `go`. When generating that line from zsh, use `printf '%s\n'`,
+not `echo`: zsh's `echo` turns `\r` into a real carriage return, and
+SIMH then rejects the string ("String must be quote delimited"). A
+`send after=N` queued at the top level before `run 50`/`go` was not
+delivered in this environment, on either this kernel or the unmerged
+branch.

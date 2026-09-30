@@ -318,8 +318,12 @@ static const char *skipelem(const char *path, char *name) {
     return path;
 }
 
+/* Where a relative path starts: the calling process's current directory,
+ * set by do_syscall before every syscall (SHELL_NOTES.md). */
+unsigned int fs_cwd = ROOTINO;
+
 static unsigned int walk(const char *path, int parent, char *name) {
-    unsigned int cur = ROOTINO, next;
+    unsigned int cur = (*path == '/') ? ROOTINO : fs_cwd, next;
     const char *rest;
     char elem[DIRSIZ + 1];
     for (;;) {

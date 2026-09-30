@@ -43,11 +43,14 @@ static unsigned int bootcount(void) {
     return n;
 }
 
-int main(void) {
+static int exists(const char *p) {
+    unsigned int st[4];
+    return stat(p, st) == 0;
+}
+
+static void autotest(void) {
     int pids[8], np = 0, i, st;
     unsigned int free0;
-    mkdir("/etc");                      /* may already exist */
-    uputs("init: boot #"); uputu(bootcount()); uputs("\n");
     free0 = (unsigned int)freeblocks();
     uputs("init: free blocks "); uputu(free0); uputs("\n");
 
@@ -70,9 +73,28 @@ int main(void) {
         /* badptr is expected to be killed (-2) */
         if (i == 4 ? st != -2 : st != 0) nfail++;
     }
-    run("/bin/ls");
     uputs("init: free blocks "); uputu((unsigned int)freeblocks());
     uputs(", failures "); uputu(nfail); uputs("\n");
+}
+
+/* SHELL_NOTES.md: tests if /etc/autotest exists, then /etc/rc through
+ * sh, then an interactive shell; when it exits, init exits (shutdown). */
+int main(void) {
+    static char *rc[] = { "sh", "/etc/rc", 0 };
+    static char *sh[] = { "sh", 0 };
+    int pid, st;
+    mkdir("/etc");                      /* may already exist */
+    uputs("init: boot #"); uputu(bootcount()); uputs("\n");
+    if (exists("/etc/autotest")) autotest();
+    if (exists("/etc/rc")) {
+        pid = spawnv("/bin/sh", rc);
+        st = pid < 0 ? -1 : wait(pid);
+        uputs("init: /etc/rc exited "); uputi(st); uputs("\n");
+    }
+    pid = spawnv("/bin/sh", sh);
+    if (pid < 0) { uputs("init: no /bin/sh\n"); sys_exit(1); }
+    st = wait(pid);
+    uputs("init: shell exited "); uputi(st); uputs(", halting\n");
     sys_exit((int)nfail);
     return 0;
 }

@@ -4255,3 +4255,52 @@ freemap stays `int` (one word per flag, no reason to change).
   `FrameIndex + constant` (e.g. the 2nd word of a local `long`) now goes
   through LDIND instead of a direct `LDA x,off,2`; that's correct, just
   slower. Worth a Select() fold later.
+
+### 39. A program over ~28KW got a stack past 32KW that wrapped into its own code (fixed)
+
+**Symptom** (merging the interrupt-io and shell kernel branches): the
+merged kernel mounted the filesystem, then `EJSR 3410` landed on `JMP 1`
+and the machine looped at 0. The trace showed the kernel stack pointer
+(040) around `03511`, inside the code.
+
+**Cause**: `reorder_asm.py`'s `fix_stack_pointer` sets `_STACKTOP = end +
+4096` and only checked it against `_STACKLIM` (`0177700`), a 16-bit
+value. Logical addresses are 15 bits, so the merged kernel (30218 words)
+got `_STACKTOP = 0103012`, which wraps to `03012`, and its boot stack grew
+over code. Any program between 28672 and ~61000 words was affected, with
+no error.
+
+**Fix**: fail the build if `end + stack` passes `0100000`, with a message
+naming the problem. `ECLIPSE_STACK_WORDS` overrides the 4096-word default
+for a program that provably needs less. The kernel uses 1536: its boot
+stack only runs until `k_start`, and every later kernel path runs on the
+per-process stacks, which peak at 655 of 1024 words.
+
+### 40. Page zero ran out: out-of-range JMPs now use EJMP where that's safe (changed)
+
+**Symptom**: the merged kernel failed to assemble. 25 `JMP @L_SLOT`
+relaxation slots, on top of the constant pool, pushed page-zero `var`s
+past address 255.
+
+**Change** (`reorder_asm.py relax_long_jumps`): an out-of-range `JMP` now
+becomes `EJMP target,0` (2 words, 15-bit absolute, no page-zero slot) when
+the instruction before it cannot skip. After a skip it keeps the
+one-word `JMP @slot`. Skips advance PC by exactly one word (`eclipse_cpu.c`
+`PC = PC + 1`), so skipping a 2-word `EJMP` would land in its middle. The
+"cannot skip" test is a whitelist: known non-skipping mnemonics, and ALU
+ops without a skip field. Anything else (ISZ/DSZ, SKP*, SGT, ...) is
+assumed to skip. In the merged kernel, 16 of the 25 slots became EJMPs.
+
+**Verified**: c-testsuite 206/220 in both `--ieee` and default mode, with
+a per-test set identical to the committed `reorder_asm.py`. The merged
+kernel passes every shell and I/O test (KERNEL_NOTES.md §10).
+
+### 41. Large stack frames lose values through the shared `_scratch` word (OPEN, worked around)
+
+Found by the shell work (SHELL_NOTES.md). In a function whose frame is
+large enough that offsets need the large-offset path,
+`c[2]=3; c[2]=c[2]+1; return c[2]+pad[0];` returns 4, not 5: the
+large-offset address sequence overwrites `_scratch`, which the surrounding
+load/store is still using. Worked around by making big arrays `static` in
+the shell, the utilities, `fstest` and the kernel's syscall path. The real
+fix belongs in `EclipseRegisterInfo::eliminateFrameIndex`. Not yet fixed.

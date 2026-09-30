@@ -1,0 +1,10 @@
+mkdir /keep
+echo 'quoted  text | not a pipe' > /keep/q
+cat /keep/q
+cat /bin/fstest | cat | cat > /keep/fstest.copy
+wc /bin/fstest /keep/fstest.copy
+cat /bin/fstest | wc
+ls -l /keep
+echo one > /keep/log ; echo two >> /keep/log ; echo three >> /keep/log
+wc < /keep/log
+exit 5

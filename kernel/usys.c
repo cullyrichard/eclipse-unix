@@ -60,8 +60,16 @@ int sys_unmapwin(int winpage, int npages) {
 int open(const char *path, int flags) { return __syscall(SYS_OPEN, (int)path, flags); }
 int close(int fd)                     { return __syscall(SYS_CLOSE, fd, 0); }
 int read(int fd, char *buf, int n)    { return __syscall3(SYS_READ, fd, (int)buf, n); }
+/* A pipe may take fewer bytes than asked (SHELL_NOTES.md); keep going
+ * until everything is written or an error/EOF-of-readers stops it. */
 int write(int fd, const char *buf, int n) {
-    return __syscall3(SYS_WRITEFD, fd, (int)buf, n);
+    int done = 0, r;
+    while (done < n) {
+        r = __syscall3(SYS_WRITEFD, fd, (int)(buf + done), n - done);
+        if (r <= 0) return done ? done : r;
+        done += r;
+    }
+    return done;
 }
 int lseek(int fd, int off, int whence) { return __syscall3(SYS_LSEEK, fd, off, whence); }
 int mkdir(const char *path)           { return __syscall(SYS_MKDIR, (int)path, 0); }
@@ -88,3 +96,16 @@ void uputi(int v) {
     if (v < 0) { uputs("-"); uputu((unsigned int)(-v)); }
     else uputu((unsigned int)v);
 }
+
+int spawnv(const char *path, char **argv) { return __syscall(SYS_SPAWNV, (int)path, (int)argv); }
+int chdir(const char *path)           { return __syscall(SYS_CHDIR, (int)path, 0); }
+int dup(int fd)                       { return __syscall(SYS_DUP, fd, 0); }
+int dup2(int fd, int nfd)             { return __syscall(SYS_DUP2, fd, nfd); }
+int pipe(int *fds)                    { return __syscall(SYS_PIPE, (int)fds, 0); }
+int stat(const char *path, unsigned int *st) { return __syscall(SYS_STAT, (int)path, (int)st); }
+
+int ustrcmp(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return ((int)*a & 255) - ((int)*b & 255);
+}
+void uputsfd(int fd, const char *s) { write(fd, s, ustrlen(s)); }

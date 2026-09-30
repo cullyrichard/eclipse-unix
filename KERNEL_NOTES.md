@@ -468,3 +468,50 @@ performance measure.
 
 
 **Update:** `char` arrays work now: pointer values are byte addresses and chars pack two per word (DEBUGGING_NOTES.md #38). `SYS_WRITE` takes an ordinary `char` buffer, and absolute word addresses in user code are written as byte addresses (`(int *)0160000` is word 070000).
+
+## 10. Merge of the interrupt-io and shell branches
+
+`interrupt-io` (IO_NOTES.md: per-process kernel stacks, sleep/wakeup,
+interrupt-driven TTI and DSK, idle loop, fs lock) and `shell`
+(SHELL_NOTES.md: argv, cwd, dup/dup2, pipes, stat, /bin/sh and utilities)
+were developed in parallel from `20c6bf5` and merged here. What the merge
+had to decide:
+
+- **Pipe blocking.** `shell` blocked a pipe reader/writer by rewinding the
+  saved PC onto the `SYC` and restarting the call when woken (`P_PIPEW`,
+  `sys_block_chan`). With per-process kernel stacks that machinery isn't
+  needed: pipes now `while (empty/full) ksleep(CHAN_PIPE + pipe)` and
+  re-test, and every transfer or close wakes the channel. `P_PIPEW`,
+  `p_waitchan`, `proc_wakeup` and the restart code are gone. (`P_PIPEW`
+  was also 5, the same value as `P_EMBRYO`.)
+- **The fs lock vs pipes.** `interrupt-io` took the fs lock around every
+  read/write except console reads. A pipe read can sleep indefinitely, so
+  under that rule a reader would hold the lock its writer needs:
+  deadlock. `fsys_needslock(no, fd)` now takes the lock only when the call
+  can reach `fs.c`. Console and pipe I/O, `close`, `dup`, `dup2` and
+  `pipe` never take it.
+- **spawn/spawnv** run entirely under the fs lock. Loading an image can
+  sleep on the disk, and the shared static `path` and argv staging buffers
+  need the protection.
+- **Liveness in `proc_exit`**: `shell`'s "parent is anything but
+  FREE/ZOMBIE" test, which subsumes `interrupt-io`'s explicit
+  RUN/WAIT/SLEEP fix.
+- **Toolchain**: the merged kernel (30218 words) exposed two
+  `reorder_asm.py` problems, both fixed (DEBUGGING_NOTES.md #39, #40): the
+  stack wrapping past 32KW, and page-zero exhaustion from long-jump
+  slots. The kernel builds with `ECLIPSE_STACK_WORDS=1536`. Kernel memory
+  is now tight: about 2.5KW is left below 32KW. The 9 kernel stacks
+  (9216 words) are the obvious place to recover space; the measured peak
+  is 655 of 1024 words.
+
+Verification of the merged kernel, re-running each branch's own evidence:
+
+| check | result |
+|---|---|
+| shell full session (`tests/session_full.txt`), diffed against SHELL_NOTES.md | identical except the 2 extra `/bin` programs (inode numbers +2, `ls -l /bin \| wc` 22 lines vs 20) |
+| heavy pipe session (`tests/session_keep.txt`) | 8380-byte file through a 3-stage pipe byte-identical (host `cmp`); Eclipse `wc` = host `wc` |
+| autotest + rc, two boots of one disk | `fstest` 40/40, writers' files match the host pattern, `badptr` -2, free blocks stable at 868, `fsck` 0 problems both boots |
+| `io_boundary.py` (inject TTI exactly at every ION-enable instruction) | 0 bad runs |
+| console wait, disk overlap (`ioinit`, 4000-dot spinner) | see IO_NOTES.md merge addendum |
+| `bigmem` as init | `errs=0` all rounds, 992 frames free |
+| c-testsuite, both float modes | 206/220, same set as before |

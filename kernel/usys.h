@@ -35,4 +35,14 @@ void uputs(const char *s);
 void uputu(unsigned int v);
 void uputi(int v);
 
+/* shell support (SHELL_NOTES.md) */
+int spawnv(const char *path, char **argv);
+int chdir(const char *path);
+int dup(int fd);
+int dup2(int fd, int nfd);
+int pipe(int *fds);
+int stat(const char *path, unsigned int *st);  /* inum, type (1 file, 2 dir), nlink, size */
+int ustrcmp(const char *a, const char *b);
+void uputsfd(int fd, const char *s);
+
 #endif

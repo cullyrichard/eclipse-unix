@@ -15,6 +15,7 @@
 #define CHAN_DSK     2      /* the disk transfer in flight finished */
 #define CHAN_DSKFREE 3      /* the disk controller became free */
 #define CHAN_FSLOCK  4      /* the filesystem lock was released */
+#define CHAN_PIPE    16     /* + pipe index: data, space, or an end closed */
 
 void ksleep(unsigned int chan);
 void wakeup(unsigned int chan);

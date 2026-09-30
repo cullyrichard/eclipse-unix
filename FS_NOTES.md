@@ -1,5 +1,8 @@
 # FS — a V6-style filesystem on DSK, and booting `/bin/init` from it
 
+> Continued in `SHELL_NOTES.md`: argv, cwd, dup/dup2, pipes, stat, `/bin/sh`
+> and utilities; `init` now ends in an interactive shell.
+
 Phase 8 of the OS roadmap. The kernel (`KERNEL_NOTES.md`) now mounts a
 filesystem on DSK unit 0 at boot and runs `/bin/init` **from disk**. User
 programs are ordinary files in `/bin`, loaded by a new `spawn(path)`

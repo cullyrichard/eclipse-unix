@@ -35,6 +35,7 @@ unsigned int p_nframes[NPROC];
 int p_parent[NPROC];            /* -1: none (kernel-spawned) */
 unsigned int p_status[NPROC];   /* exit status, valid in P_ZOMBIE */
 int p_waitpid[NPROC];           /* child a P_WAIT process waits for */
+
 /* Big-memory segments (KERNEL_NOTES.md section 9): extra physical frames a
  * process owns beyond its 32KW logical space, reachable only by mapping
  * them into a "window" of its logical pages with SYS_MAPWIN.
@@ -103,7 +104,10 @@ static int proc_alloc(unsigned int nwords, unsigned int base,
 
     pt0 = (unsigned int)n * NPAGES;
     lastimg = (base + nwords - 1) >> 10;
-    sfirst = stacktop >> 10;
+    /* stacktop-1 too: main's second argument (argv) lives there
+     * (SHELL_NOTES.md), and reorder_asm.py leaves a 4096-word gap below
+     * _STACKTOP, so that word is never program data */
+    sfirst = (stacktop - 1) >> 10;
     slast = (stacktop + stackwords - 1) >> 10;
     if (slast > NPAGES - 1) slast = NPAGES - 1;
 
@@ -164,6 +168,69 @@ int proc_create(const unsigned int *words, unsigned int nwords,
 #define AOUT_MAGIC 0407
 static unsigned int lbuf[256];
 
+/* Arguments for the next proc_spawn: kargc strings packed NUL-terminated in
+ * kargs, string i at byte kargoff[i]; kargn bytes in all. */
+#define MAXARGS 16
+#define ARGMAX  256
+static char kargs[ARGMAX];
+static unsigned int kargoff[MAXARGS], kargc, kargn;
+
+static void args_one(const char *path) {
+    unsigned int i;
+    kargc = 1;
+    kargoff[0] = 0;
+    for (i = 0; path[i] && i < ARGMAX - 1; i++) kargs[i] = path[i];
+    kargs[i] = 0;
+    kargn = i + 1;
+}
+
+/* copy the caller's NULL-terminated argv (byte address of a char *[]) */
+static int args_user(unsigned int uargv) {
+    unsigned int p, len;
+    kargc = 0;
+    kargn = 0;
+    if (uargv & 1) return -1;
+    for (;;) {
+        if (!uvalid(uargv + 2 * kargc, 2)) return -1;
+        p = kcopyin_word((uargv >> 1) + kargc);
+        if (p == 0) return 0;
+        if (kargc == MAXARGS) return -1;
+        if (ucopystr(p, kargs + kargn, ARGMAX - kargn) < 0) return -1;
+        kargoff[kargc] = kargn;
+        for (len = 0; kargs[kargn + len]; len++) ;
+        kargn += len + 1;
+        kargc++;
+    }
+}
+
+static void wlog(unsigned int pt0, unsigned int a, unsigned int v) {
+    kfar_write(p_pt[pt0 + (a >> 10)] & 01777, a & 01777, v);
+}
+
+/* Lay out argv at the top of the child's stack area and hand main() its
+ * arguments: eclipse-cc's _start does 040 = _STACKTOP; EJSR main, so
+ * main's frame pointer is _STACKTOP+5 and it reads its first argument at
+ * FP-5 = _STACKTOP, its second at FP-6 = _STACKTOP-1 (the backend's
+ * convention, checked on a compiled 2-argument function). */
+static void args_place(unsigned int pt0, unsigned int stacktop) {
+    unsigned int slast, top, strw, sw, av, i, v;
+    slast = (stacktop + STACKWORDS - 1) >> 10;
+    if (slast > NPAGES - 1) slast = NPAGES - 1;
+    top = ((slast + 1) << 10) - 1;              /* last mapped word */
+    strw = (kargn + 1) >> 1;
+    sw = top + 1 - strw;                        /* strings */
+    av = sw - (kargc + 1);                      /* char *argv[kargc+1] */
+    for (i = 0; i < strw; i++) {
+        v = ((unsigned int)kargs[2 * i] & 0377) << 8;
+        if (2 * i + 1 < kargn) v |= (unsigned int)kargs[2 * i + 1] & 0377;
+        wlog(pt0, sw + i, v);
+    }
+    for (i = 0; i < kargc; i++) wlog(pt0, av + i, 2 * sw + kargoff[i]);
+    wlog(pt0, av + kargc, 0);
+    wlog(pt0, stacktop, kargc);                 /* argc */
+    wlog(pt0, stacktop - 1, 2 * av);            /* argv (byte address) */
+}
+
 int proc_spawn(const char *path, int parent) {
     unsigned int inum, hdr[4], off, i, k, a, pfn, pt0;
     int n, got;
@@ -188,6 +255,8 @@ int proc_spawn(const char *path, int parent) {
             kfar_write(pfn, a & 01777, lbuf[k]);
         }
     }
+    args_place(pt0, hdr[3]);
+    if (parent >= 0) fsys_inherit(n, parent);
     p_parent[n] = parent;
     p_state[n] = P_RUN;
     return n;
@@ -246,11 +315,10 @@ static void proc_exit(int n, unsigned int status) {
         p_ac0[par] = status;            /* wait()'s return value */
         p_state[par] = P_RUN;
         p_state[n] = P_FREE;
-    } else if (par >= 0 && (p_state[par] == P_RUN || p_state[par] == P_WAIT ||
-                            p_state[par] == P_SLEEP)) {
-        /* a parent asleep inside the kernel (e.g. in spawn, on the disk)
-         * is alive too -- found when a child exited during its parent's
-         * next spawn and its slot was reused (IO_NOTES.md) */
+    } else if (par >= 0 && p_state[par] != P_FREE && p_state[par] != P_ZOMBIE) {
+        /* any live parent -- including one asleep inside the kernel (e.g.
+         * in spawn, on the disk): found when a child exited during its
+         * parent's next spawn and its slot was reused (IO_NOTES.md) */
         p_status[n] = status;
         p_state[n] = P_ZOMBIE;
     } else {
@@ -548,9 +616,14 @@ static int sys_write_user(unsigned int buf, unsigned int len) {
     return (int)len;
 }
 
+/* static, not a do_syscall local: keeps its frame small (SHELL_NOTES.md,
+ * "large frames") */
+static char path[FS_MAXPATH];
+
 static void do_syscall(void) {
     unsigned int r;
     st_syscalls++;
+    fs_cwd = fsys_cwd(curproc);     /* relative paths (SHELL_NOTES.md) */
     r = 0;
     if (k_ac0 == SYS_PUTCHAR) {
         console_putchar((int)k_ac1);
@@ -565,11 +638,13 @@ static void do_syscall(void) {
     } else if (k_ac0 == SYS_WRITE) {
         r = (unsigned int)sys_write_user(k_ac1, k_ac2);
     } else if (k_ac0 == SYS_EXIT) {
+#ifdef KTRACE_EXIT
         kputs("\r\nkernel: pid ");
         kputu((unsigned int)curproc);
         kputs(" exited, status ");
         kputu(k_ac1);
         kputs("\r\n");
+#endif
         proc_exit(curproc, k_ac1);
         sched();
         return;
@@ -588,45 +663,34 @@ static void do_syscall(void) {
             sched();
             return;
         }
-    } else if (k_ac0 == SYS_SPAWN || k_ac0 == SYS_OPEN ||
-               k_ac0 == SYS_LSEEK || k_ac0 == SYS_MKDIR ||
-               k_ac0 == SYS_UNLINK || k_ac0 == SYS_FREEBLK ||
-               ((k_ac0 == SYS_READ || k_ac0 == SYS_WRITEFD) &&
-                !fsys_isconsole(k_ac1))) {
-        /* anything that can reach fs.c: under the fs lock. Arguments are
-         * copied to locals first -- k_ac* belong to whoever runs next
-         * once this process sleeps. */
-        unsigned int op = k_ac0, a1 = k_ac1, a2 = k_ac2, a3 = k_ac3;
+    } else if (k_ac0 == SYS_SPAWN || k_ac0 == SYS_SPAWNV) {
+        /* Under the fs lock: loading the image can sleep on the disk, and
+         * `path` and the argv staging buffer are shared statics that the
+         * lock also protects. Arguments copied to locals first -- k_ac*
+         * belong to whoever runs next once this process sleeps. */
+        unsigned int op = k_ac0, a1 = k_ac1, a2 = k_ac2;
+        int c = -1;
         fs_lock();
-        if (op == SYS_SPAWN) {
-            char path[FS_MAXPATH];
-            int c = -1;
-            if (ucopystr(a1, path, FS_MAXPATH) == 0)
+        if (ucopystr(a1, path, FS_MAXPATH) == 0) {
+            if (op == SYS_SPAWN || a2 == 0) args_one(path);
+            if (op == SYS_SPAWN || a2 == 0 || args_user(a2) == 0)
                 c = proc_spawn(path, curproc);
-            r = (unsigned int)c;
-        } else if (op == SYS_OPEN) {
-            r = sys_open(a1, a2);
-        } else if (op == SYS_READ) {
-            r = sys_read(a1, a2, a3);
-        } else if (op == SYS_WRITEFD) {
-            r = sys_writefd(a1, a2, a3);
-        } else if (op == SYS_LSEEK) {
-            r = sys_lseek(a1, a2, a3);
-        } else if (op == SYS_MKDIR) {
-            r = sys_mkdir(a1);
-        } else if (op == SYS_UNLINK) {
-            r = sys_unlink(a1);
-        } else {
-            r = fs_freeblocks();
         }
         fs_unlock();
-    } else if (k_ac0 == SYS_CLOSE) {
-        r = sys_close(k_ac1);
-    } else if (k_ac0 == SYS_READ) {
-        unsigned int a1 = k_ac1, a2 = k_ac2, a3 = k_ac3;
-        r = sys_read(a1, a2, a3);            /* console: may sleep */
-    } else if (k_ac0 == SYS_WRITEFD) {
-        r = sys_writefd(k_ac1, k_ac2, k_ac3);
+        r = (unsigned int)c;
+    } else if ((k_ac0 >= SYS_OPEN && k_ac0 <= SYS_UNLINK) ||
+               (k_ac0 >= SYS_CHDIR && k_ac0 <= SYS_STAT) ||
+               k_ac0 == SYS_FREEBLK) {
+        /* descriptor/file syscalls (fsys.c; kept out of this function so
+         * its branches stay within JMP range -- SHELL_NOTES.md). The fs
+         * lock only for calls that can reach fs.c: a console or pipe read
+         * may sleep indefinitely and must not hold it, or a pipe's writer
+         * could never get in (merge of IO_NOTES.md + SHELL_NOTES.md). */
+        unsigned int op = k_ac0, a1 = k_ac1, a2 = k_ac2, a3 = k_ac3;
+        int lk = fsys_needslock(op, a1);
+        if (lk) fs_lock();
+        r = op == SYS_FREEBLK ? fs_freeblocks() : fsys_syscall(op, a1, a2, a3);
+        if (lk) fs_unlock();
     } else {
         r = 0177777;        /* -1: unknown syscall */
     }
@@ -694,7 +758,17 @@ void k_trap(int cause) {
     }
     if (cause == K_FLT) {
         st_faults++;
-        if (k_mapstat & 020000) kill_cur("killed: I/O protection fault");
+        /* main() returning: _start runs HALT at 056 right after
+         * EJSR main (EclipseAsmPrinter's fixed _start), and an I/O fault
+         * reports the next address (manual Ch.2 p.2-30). AC0 holds
+         * main's return value: treat it as exit(AC0). */
+        if ((k_mapstat & 020000) && (k_pc & 077777) == 057 &&
+            kcopyin_word(056) == 063077) {
+            st_faults--;                /* a normal exit, not a fault */
+            proc_exit(curproc, k_ac0);
+            sched();
+        }
+        else if (k_mapstat & 020000) kill_cur("killed: I/O protection fault");
         /* Code 010000 is write-protect in the manual, but processes run
          * without MapStat's WP-enable bit (020), so it cannot be a real
          * WP fault here: SIMH's PutMap raises this same code for a WRITE
