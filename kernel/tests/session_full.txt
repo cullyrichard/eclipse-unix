@@ -1,0 +1,39 @@
+pwd
+mkdir /home
+cd /home
+pwd
+echo hello from the shell > greet
+cat greet
+echo second line >> greet
+cat < greet
+wc greet
+cp greet copy ; ls -l
+cat /bin/../home/greet | wc
+ls -l /bin | wc
+echo a b c | cat | cat | wc
+mkdir sub ; cd sub ; pwd ; cd .. ; rm sub ; ls
+echo 'script ran' > /home/s1
+echo echo from a script > script
+echo pwd >> script
+echo exit 3 >> script
+sh script
+echo status $?
+nosuchcmd
+echo status $?
+cat /nope
+echo status $?
+cat < /nope
+echo >
+echo hi > /nodir/x
+cd greet
+ls /nope
+rm /nope
+badptr
+echo status $?
+/bin/echo absolute path
+cd
+pwd
+rm /home/greet /home/copy /home/script /home/s1
+rm /home
+ls
+exit 0

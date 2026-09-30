@@ -16,6 +16,7 @@
 #define P_RUN      1        /* runnable (round-robin candidate) */
 #define P_ZOMBIE   2        /* exited, status kept for wait(); frames freed */
 #define P_WAIT     3        /* blocked in wait() for p_waitpid */
+#define P_PIPEW    5        /* blocked on a pipe; syscall restarts on wakeup */
 
 #define STACKWORDS 1024     /* stack mapped above a program's _STACKTOP */
 

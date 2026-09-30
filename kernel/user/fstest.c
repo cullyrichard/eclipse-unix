@@ -24,8 +24,9 @@ static int streq(const char *a, const char *b) {
 #define WCH 100
 #define RCH 77
 
+static char buf[WCH], rb[RCH];      /* static: SHELL_NOTES.md "large frames" */
+
 int main(void) {
-    char buf[WCH], rb[RCH];
     static const char msg[] = "hello, filesystem\n";
     unsigned int free0, i, j, bad;
     int fd, fd2, n, got;
@@ -34,6 +35,10 @@ int main(void) {
     unlink("/ft/sub/f"); unlink("/ft/sub"); unlink("/ft/a");
     unlink("/ft/big"); unlink("/ft");
     free0 = (unsigned int)freeblocks();
+    /* guards the "free blocks restored" check below against passing
+     * vacuously when freeblocks() itself fails (-1 == -1): found when a
+     * dispatch refactor dropped SYS_FREEBLK (SHELL_NOTES.md) */
+    check("freeblocks() sane", free0 > 0 && free0 < 1024);
 
     check("open missing -> -1", open("/nope", O_RDONLY) == -1);
     check("mkdir /ft", mkdir("/ft") == 0);

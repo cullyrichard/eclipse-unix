@@ -46,4 +46,12 @@
 #define SYS_WAIT     17   /* pid (a child) -> its exit status; blocks */
 #define SYS_FREEBLK  18   /* -> free data blocks on the filesystem */
 
+/* Shell support (SHELL_NOTES.md). */
+#define SYS_SPAWNV   30   /* path, argv (char *[], NULL-terminated; 0 = {path}) -> pid */
+#define SYS_CHDIR    31   /* path */
+#define SYS_DUP      32   /* fd -> lowest free fd */
+#define SYS_DUP2     33   /* fd, newfd (closes newfd first) -> newfd */
+#define SYS_PIPE     34   /* int fds[2] -> 0; fds[0] read end, fds[1] write end */
+#define SYS_STAT     35   /* path, unsigned st[4] = {inum, type, nlink, size} */
+
 #endif

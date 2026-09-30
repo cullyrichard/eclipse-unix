@@ -64,5 +64,6 @@ int fs_mkdir(const char *path);
 int fs_unlink(const char *path);
 unsigned int fs_create(const char *path);        /* existing file or new; 0 = fail */
 unsigned int fs_freeblocks(void);
+extern unsigned int fs_cwd;             /* start of relative paths */
 
 #endif
