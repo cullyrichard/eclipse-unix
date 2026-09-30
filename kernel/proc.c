@@ -4,6 +4,8 @@
 #include "ksyscall.h"
 #include "../examples/pmm.h"
 #include "../examples/console.h"
+#include "fs.h"
+#include "fsys.h"
 
 /* ---- context exchange with kernel/kentry.s ------------------------------
  * kentry.s's entry paths write the interrupted user context here, and
@@ -27,6 +29,9 @@ unsigned int p_ac0[NPROC], p_ac1[NPROC], p_ac2[NPROC], p_ac3[NPROC];
 unsigned int p_pc[NPROC];
 unsigned int p_pt[NPROC * NPAGES];
 unsigned int p_nframes[NPROC];
+int p_parent[NPROC];            /* -1: none (kernel-spawned) */
+unsigned int p_status[NPROC];   /* exit status, valid in P_ZOMBIE */
+int p_waitpid[NPROC];           /* child a P_WAIT process waits for */
 /* Big-memory segments (KERNEL_NOTES.md section 9): extra physical frames a
  * process owns beyond its 32KW logical space, reachable only by mapping
  * them into a "window" of its logical pages with SYS_MAPWIN.
@@ -51,11 +56,16 @@ static int pte_valid(unsigned int pte) {
     return (pte & PTE_INVALID) != PTE_INVALID;
 }
 
-int proc_create(const unsigned int *words, unsigned int nwords,
-                unsigned int base, unsigned int stacktop,
-                unsigned int stackwords) {
+static void proc_free(int n);
+
+/* Allocate a process slot and an address space for an image of nwords at
+ * base with its stack at stacktop: fixed pages mapped and zeroed, the rest
+ * invalid. Returns the slot (state still P_FREE) or -1. On failure every
+ * frame taken is returned. */
+static int proc_alloc(unsigned int nwords, unsigned int base,
+                      unsigned int stacktop, unsigned int stackwords) {
     int n, s;
-    unsigned int i, a, pfn, lastimg, sfirst, slast, pt0;
+    unsigned int i, pfn, lastimg, sfirst, slast, pt0;
 
     n = -1;
     for (s = 0; s < NPROC; s++) {
@@ -71,6 +81,7 @@ int proc_create(const unsigned int *words, unsigned int nwords,
 
     p_nframes[n] = 0;
     p_nseg[n] = 0;
+    fsys_procinit(n);       /* before anything that could call proc_free */
 #ifdef KDEBUG
     kputs("  dbg lastimg="); kputu(lastimg);
     kputs(" sfirst="); kputu(sfirst);
@@ -84,21 +95,72 @@ int proc_create(const unsigned int *words, unsigned int nwords,
         if ((unsigned int)s <= lastimg ||
             ((unsigned int)s >= sfirst && (unsigned int)s <= slast)) {
             pfn = (unsigned int)pmm_alloc_page();
-            if (pfn == (unsigned int)PMM_NONE) return -1;
+            if (pfn == (unsigned int)PMM_NONE) {
+                while (++s < NPAGES) p_fixed[pt0 + s] = 0;
+                proc_free(n);
+                p_state[n] = P_FREE;
+                return -1;
+            }
             p_pt[pt0 + s] = ((unsigned int)s << 10) | pfn;
             p_fixed[pt0 + s] = 1;
             p_nframes[n]++;
             for (i = 0; i < 1024; i++) kfar_write(pfn, i, 0);
         }
     }
+    p_ac0[n] = 0; p_ac1[n] = 0; p_ac2[n] = 0; p_ac3[n] = 0;
+    p_pc[n] = base;         /* _start; carry clear */
+    p_parent[n] = -1;
+    p_status[n] = 0;
+    return n;
+}
+
+int proc_create(const unsigned int *words, unsigned int nwords,
+                unsigned int base, unsigned int stacktop,
+                unsigned int stackwords) {
+    int n;
+    unsigned int i, a, pfn, pt0;
+    n = proc_alloc(nwords, base, stacktop, stackwords);
+    if (n < 0) return -1;
+    pt0 = (unsigned int)n * NPAGES;
     for (i = 0; i < nwords; i++) {
         a = base + i;
         pfn = p_pt[pt0 + (a >> 10)] & 01777;
         kfar_write(pfn, a & 01777, words[i]);
     }
+    p_state[n] = P_RUN;
+    return n;
+}
 
-    p_ac0[n] = 0; p_ac1[n] = 0; p_ac2[n] = 0; p_ac3[n] = 0;
-    p_pc[n] = base;         /* _start; carry clear */
+/* Executable file format (FS_NOTES.md; kernel/fstools/mkfs.py writes it):
+ *   word 0 AOUT_MAGIC, 1 nwords, 2 base, 3 stacktop, then nwords words. */
+#define AOUT_MAGIC 0407
+static unsigned int lbuf[256];
+
+int proc_spawn(const char *path, int parent) {
+    unsigned int inum, hdr[4], off, i, k, a, pfn, pt0;
+    int n, got;
+    inum = fs_namei(path);
+    if (inum == 0) return -1;
+    if (fs_readi(inum, 0, (char *)hdr, 8) != 8 || hdr[0] != AOUT_MAGIC)
+        return -1;
+    if (hdr[1] == 0 || hdr[2] + hdr[1] < hdr[2] || hdr[2] + hdr[1] > 0100000)
+        return -1;
+    n = proc_alloc(hdr[1], hdr[2], hdr[3], STACKWORDS);
+    if (n < 0) return -1;
+    pt0 = (unsigned int)n * NPAGES;
+    /* the image's words, big-endian bytes on disk = exactly the byte
+     * order of a word array viewed through a char pointer */
+    for (i = 0; i < hdr[1]; i += 256) {
+        off = 8 + 2 * i;
+        got = fs_readi(inum, off, (char *)lbuf, 512);
+        if (got < 2) break;
+        for (k = 0; k < (unsigned int)got / 2 && i + k < hdr[1]; k++) {
+            a = hdr[2] + i + k;
+            pfn = p_pt[pt0 + (a >> 10)] & 01777;
+            kfar_write(pfn, a & 01777, lbuf[k]);
+        }
+    }
+    p_parent[n] = parent;
     p_state[n] = P_RUN;
     return n;
 }
@@ -134,8 +196,34 @@ static void proc_free(int n) {
     for (s = 0; (unsigned int)s < p_nseg[n]; s++)
         pmm_free_page((int)p_seg[sg0 + s]);
     p_nseg[n] = 0;
-    p_state[n] = P_ZOMBIE;
+    fsys_procexit(n);
     if (loaded == n) loaded = -1;
+}
+
+static void sched(void);
+
+/* Process n is gone with this status: release everything, hand the status
+ * to a waiting parent or keep it as a zombie, orphan its children. */
+static void proc_exit(int n, unsigned int status) {
+    int i, par;
+    proc_free(n);
+    for (i = 0; i < NPROC; i++) {
+        if (p_state[i] != P_FREE && p_parent[i] == n) {
+            p_parent[i] = -1;
+            if (p_state[i] == P_ZOMBIE) p_state[i] = P_FREE;
+        }
+    }
+    par = p_parent[n];
+    if (par >= 0 && p_state[par] == P_WAIT && p_waitpid[par] == n) {
+        p_ac0[par] = status;            /* wait()'s return value */
+        p_state[par] = P_RUN;
+        p_state[n] = P_FREE;
+    } else if (par >= 0 && (p_state[par] == P_RUN || p_state[par] == P_WAIT)) {
+        p_status[n] = status;
+        p_state[n] = P_ZOMBIE;
+    } else {
+        p_state[n] = P_FREE;
+    }
 }
 
 /* The current process's page table changed: make k_resume reload map A. */
@@ -274,7 +362,7 @@ static void kill_cur(const char *why) {
     kputs(" mapstat=");
     kputo(k_mapstat);
     kputs("\r\n");
-    proc_free(curproc);
+    proc_exit(curproc, 0177776);        /* killed: status -2 */
     sched();
 }
 
@@ -320,9 +408,46 @@ static void do_syscall(void) {
         kputs(" exited, status ");
         kputu(k_ac1);
         kputs("\r\n");
-        proc_free(curproc);
+        proc_exit(curproc, k_ac1);
         sched();
         return;
+    } else if (k_ac0 == SYS_WAIT) {
+        int c = (int)k_ac1;
+        if (c < 0 || c >= NPROC || p_parent[c] != curproc ||
+            p_state[c] == P_FREE) {
+            r = 0177777;
+        } else if (p_state[c] == P_ZOMBIE) {
+            r = p_status[c];
+            p_state[c] = P_FREE;
+        } else {
+            save_cur();                 /* block until c exits */
+            p_waitpid[curproc] = c;
+            p_state[curproc] = P_WAIT;
+            sched();
+            return;
+        }
+    } else if (k_ac0 == SYS_SPAWN) {
+        char path[FS_MAXPATH];
+        int c = -1;
+        if (ucopystr(k_ac1, path, FS_MAXPATH) == 0)
+            c = proc_spawn(path, curproc);
+        r = (unsigned int)c;
+    } else if (k_ac0 == SYS_OPEN) {
+        r = sys_open(k_ac1, k_ac2);
+    } else if (k_ac0 == SYS_CLOSE) {
+        r = sys_close(k_ac1);
+    } else if (k_ac0 == SYS_READ) {
+        r = sys_read(k_ac1, k_ac2, k_ac3);
+    } else if (k_ac0 == SYS_WRITEFD) {
+        r = sys_writefd(k_ac1, k_ac2, k_ac3);
+    } else if (k_ac0 == SYS_LSEEK) {
+        r = sys_lseek(k_ac1, k_ac2, k_ac3);
+    } else if (k_ac0 == SYS_MKDIR) {
+        r = sys_mkdir(k_ac1);
+    } else if (k_ac0 == SYS_UNLINK) {
+        r = sys_unlink(k_ac1);
+    } else if (k_ac0 == SYS_FREEBLK) {
+        r = fs_freeblocks();
     } else {
         r = 0177777;        /* -1: unknown syscall */
     }

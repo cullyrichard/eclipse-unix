@@ -106,3 +106,27 @@ unsigned int kcopyin_word(unsigned int uaddr) {
     );
     return _k_val;
 }
+
+/* Write one word at logical word address uaddr in the CURRENT process's
+ * address space, through user map A -- kcopyin_word's mirror. Same
+ * caveat: the caller must have checked the page is mapped (single-cycle
+ * skips the validity check). Processes run without write protection, so
+ * no WP check is needed either. */
+void kcopyout_word(unsigned int uaddr, unsigned int val) {
+    _k_off = uaddr & 077777;
+    _k_val = val;
+    _k_save2 = 0;
+    _k_save3 = 0;
+    asm volatile(
+        "ESTA 2,_k_save2,0\n\t"
+        "ESTA 3,_k_save3,0\n\t"
+        "SUB 0,0\n\t"
+        "DOA 0,MAP\n\t"            /* enable A (the current process) */
+        "ELDA 2,_k_off,0\n\t"
+        "ELDA 3,_k_val,0\n\t"
+        "NIOP MAP\n\t"
+        "ESTA 3,0,2\n\t"
+        "ELDA 2,_k_save2,0\n\t"
+        "ELDA 3,_k_save3,0\n\t"
+    );
+}

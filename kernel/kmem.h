@@ -7,5 +7,6 @@
 void kfar_write(unsigned int pfn, unsigned int off, unsigned int val);
 unsigned int kfar_read(unsigned int pfn, unsigned int off);
 unsigned int kcopyin_word(unsigned int uaddr);
+void kcopyout_word(unsigned int uaddr, unsigned int val);
 
 #endif

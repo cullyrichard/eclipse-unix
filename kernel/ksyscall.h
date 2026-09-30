@@ -34,4 +34,16 @@
                              past page 31, or the segment range doesn't
                              exist (nothing is changed on failure). */
 
+/* Files and processes (FS_NOTES.md). arg3 is passed in AC3. */
+#define SYS_OPEN      9   /* path, flags (O_* in fsys.h) -> fd or -1 */
+#define SYS_CLOSE    10   /* fd */
+#define SYS_READ     11   /* fd, buf, n -> bytes read (0 = EOF) or -1 */
+#define SYS_WRITEFD  12   /* fd, buf, n -> bytes written or -1 */
+#define SYS_LSEEK    13   /* fd, off, whence(0 set,1 cur,2 end) -> new off */
+#define SYS_MKDIR    14   /* path */
+#define SYS_UNLINK   15   /* path (not while open; dirs must be empty) */
+#define SYS_SPAWN    16   /* path -> pid of a new child running that file */
+#define SYS_WAIT     17   /* pid (a child) -> its exit status; blocks */
+#define SYS_FREEBLK  18   /* -> free data blocks on the filesystem */
+
 #endif

@@ -14,7 +14,10 @@
 
 #define P_FREE     0
 #define P_RUN      1        /* runnable (round-robin candidate) */
-#define P_ZOMBIE   2        /* exited or killed; frames already freed */
+#define P_ZOMBIE   2        /* exited, status kept for wait(); frames freed */
+#define P_WAIT     3        /* blocked in wait() for p_waitpid */
+
+#define STACKWORDS 1024     /* stack mapped above a program's _STACKTOP */
 
 /* Map-status word every process runs with (DOA MAP, MMPU_NOTES.md):
  *   0001 user mode on, A/B = A (process always lives in user map A)
@@ -37,6 +40,8 @@
 int proc_create(const unsigned int *words, unsigned int nwords,
                 unsigned int base, unsigned int stacktop,
                 unsigned int stackwords);
+/* Load the executable at path into a new process; -1 on failure. */
+int proc_spawn(const char *path, int parent);
 void proc_dump(int n);      /* print logical page -> physical frame map */
 void k_start(void);         /* never returns */
 

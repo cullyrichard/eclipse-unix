@@ -137,6 +137,14 @@ frame 01777 instead of faulting.
 
 ## 5. Building and running
 
+> **Update (FS_NOTES.md):** the kernel now boots from a filesystem on DSK
+> and runs `/bin/init` from it. User programs are files in `/bin`
+> (`kernel/build.sh` puts them there with `fstools/mkfs.py`), started with
+> `spawn(path)` and reaped with `wait(pid)`, and `kernel/run.sh` boots it.
+> `mkimage.py` and the compiled-in images described below are gone, and so
+> is the `NWORKERS` knob (init decides what runs). The rest of this section
+> is the historical record of how the numbers below were produced.
+
 ```
 $ kernel/build.sh            # -> kernel/out/kernel.simh (+ user images)
 $ { cat kernel/out/kernel.simh; echo 'dep PC 50'; echo 'go'; } | ~/dev/simh-src/BIN/eclipse
