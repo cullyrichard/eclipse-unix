@@ -9,6 +9,7 @@
 #include "proc.h"
 #include "kmem.h"
 #include "../examples/console.h"
+#include "tty.h"
 
 extern int curproc;
 extern unsigned int p_pt[];
@@ -87,6 +88,10 @@ static int inum_open(unsigned int inum) {
     return 0;
 }
 
+int fsys_isconsole(unsigned int fd) {
+    return fd < NOFILE && p_ofile[curproc * NOFILE + fd] == FD_CONSOLE;
+}
+
 /* p_ofile entry for fd, or FD_NONE */
 static unsigned int fdget(unsigned int fd) {
     if (fd >= NOFILE) return FD_NONE;
@@ -133,15 +138,19 @@ unsigned int sys_read(unsigned int fd, unsigned int ubuf, unsigned int n) {
     int got, c;
     if (f == FD_NONE || !uvalid(ubuf, n)) return 0177777;
     if (f == FD_CONSOLE) {
-        /* one line (or n chars), echoed; CR is returned as '\n' */
-        for (done = 0; done < n; ) {
-            c = console_getchar() & 0177;
-            if (c == '\r') c = '\n';
-            console_putchar(c == '\n' ? '\r' : c);
-            if (c == '\n') console_putchar('\n');
-            uputb(ubuf + done, (unsigned int)c);
-            done++;
-            if (c == '\n') break;
+        /* One line (or n bytes of it) from the interrupt-driven tty
+         * (tty.c); sleeps until a line is typed. Uses its own buffer, not
+         * kbuf: a process asleep on the disk in the middle of a file
+         * read/write owns kbuf's contents (IO_NOTES.md). */
+        char lb[32];
+        unsigned int got;
+        (void)c;
+        for (done = 0; done < n; done += got) {
+            m = n - done;
+            if (m > sizeof lb) m = sizeof lb;
+            got = tty_readline(lb, m);
+            for (i = 0; i < got; i++) uputb(ubuf + done + i, (unsigned int)lb[i]);
+            if (got == 0 || lb[got - 1] == '\n') { done += got; break; }
         }
         return done;
     }

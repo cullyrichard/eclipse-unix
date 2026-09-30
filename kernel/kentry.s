@@ -91,13 +91,19 @@ k_popblk:
 	ESTA 1, k_pc
 
 // ---------------------------------------------------------------- k_call
-// AC0 = cause. Reset the kernel stack to its base (the kernel is never
-// re-entered: it runs ION-off, and user code cannot reach it except
-// through these vectors), then call k_trap(cause) using the verified
-// 1-argument hand-asm -> compiled-C shape from examples/syscall_entry.s.
+// AC0 = cause. Reset the kernel stack to the base of the CURRENT context's
+// own kernel stack (k_kbase/k_klim: the running process's, or the idle
+// stack when entered from the idle loop -- IO_NOTES.md). This is safe
+// because a trap only ever interrupts user mode or the idle loop, and
+// neither has live kernel frames on that stack; a process sleeping inside
+// the kernel has its frames on ITS OWN stack, which nothing else touches.
+// Then call k_trap(cause) using the verified 1-argument hand-asm ->
+// compiled-C shape from examples/syscall_entry.s.
 k_call:
-	ELDA 1, k_stackbase
+	ELDA 1, k_kbase
 	STA 1, 040
+	ELDA 1, k_klim
+	STA 1, 042
 	ISZ 040, 0
 	STA 0, @040
 	EJSR k_trap, 0
@@ -121,6 +127,10 @@ k_resume:
 	SUB 0, 0
 	ESTA 0, k_reload
 k_noload:
+	ELDA 0, k_kbase		// empty kernel stack for this process: the
+	STA 0, 040		// next SYC/fault pushes its return block here
+	ELDA 0, k_klim
+	STA 0, 042
 	ELDA 0, k_mapstat
 	DOA 0, MAP		// user mode takes effect at the EJMP below
 	ELDA 0, k_pc
@@ -136,6 +146,42 @@ k_noload:
 	NIOS 077		// INTEN: one more instruction runs first
 	EJMP @k_target
 
+// ---------------------------------------------------------------- k_kswitch
+// Resume a kernel context saved by ksleep() (kernel/proc.c): restore the
+// hardware stack registers 040/041/042 and AC2/AC3 from k_ks_*, and jump
+// back into ksleep at its resume label. Reached by EJMP from C (ION off).
+k_kswitch:
+	ELDA 0, k_ks_sp
+	STA 0, 040
+	ELDA 0, k_ks_fp
+	STA 0, 041
+	ELDA 0, k_ks_lim
+	STA 0, 042
+	ELDA 2, k_ks_ac2
+	ELDA 3, k_ks_ac3
+	EJMP @k_ks_pc
+
+// ---------------------------------------------------------------- k_idle
+// Nothing runnable but something is asleep: wait for an interrupt with ION
+// on, on the idle stack (C has set curproc = -1 and k_kbase/k_klim to the
+// idle stack). The interrupted PC is never resumed: k_trap handles the
+// device and calls sched() again, which may come back here.
+k_idle:
+	ELDA 0, k_kbase
+	STA 0, 040
+	ELDA 0, k_klim
+	STA 0, 042
+	NIOS 077		// INTEN (takes effect after the next instruction)
+k_idle_spin:
+	JMP k_idle_spin
+
+// ---------------------------------------------------------------- k_stkflt
+// Location 043: hardware stack overflow (040 > 042 after a push). A kernel
+// stack overflow is a kernel bug; stop where the evidence is.
+k_stkflt:
+	HALT
+	JMP k_stkflt
+
 	var k_bit15 = 0100000
 	var k_pcmask = 077777
 	var k_pitcode = 043
@@ -145,4 +191,3 @@ k_noload:
 	var k_c_flt = 3
 	var k_c_dev = 4
 	var k_target = 0
-	var k_stackbase = 0

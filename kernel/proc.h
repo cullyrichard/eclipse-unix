@@ -15,7 +15,13 @@
 #define P_FREE     0
 #define P_RUN      1        /* runnable (round-robin candidate) */
 #define P_ZOMBIE   2        /* exited, status kept for wait(); frames freed */
-#define P_WAIT     3        /* blocked in wait() for p_waitpid */
+#define P_WAIT     3        /* blocked in wait() for p_waitpid (at the user
+                               boundary: no kernel context) */
+#define P_SLEEP    4        /* asleep INSIDE the kernel on p_chan, with a
+                               saved kernel context (IO_NOTES.md) */
+#define P_EMBRYO   5        /* slot reserved, address space being built */
+
+#define KSTK       1024     /* words of kernel stack per process (+ idle) */
 
 #define STACKWORDS 1024     /* stack mapped above a program's _STACKTOP */
 

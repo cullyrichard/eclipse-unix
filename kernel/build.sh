@@ -12,7 +12,7 @@ out="${OUT:-$here/out}"
 mkdir -p "$out"
 export PATH="$HOME/dev/dgasm-src:$PATH"
 
-progs="init fstest fswriter ls worker badptr badread escape bigmem winfault"
+progs="init fstest fswriter ls worker badptr badread escape bigmem winfault spinner ttyread"
 files=()
 for p in $progs; do
   ECLIPSE_CC_KEEP_ASM="$out/$p.s" "$cc" --ieee ${UCFLAGS:-} -o "$out/$p.simh" \
@@ -22,7 +22,7 @@ done
 
 ECLIPSE_CC_KEEP_ASM="$out/kernel.s" "$cc" --ieee -o "$out/kernel.simh" ${KCFLAGS:-} \
   "$here/kmain.c" "$here/proc.c" "$here/kmem.c" "$here/kio.c" \
-  "$here/fs.c" "$here/fsys.c" \
+  "$here/fs.c" "$here/fsys.c" "$here/tty.c" "$here/kdsk.c" \
   "$here/../examples/pmm.c" "$here/../examples/console.c" \
   "$here/../examples/dsk.c" \
   "$here/kentry.s"

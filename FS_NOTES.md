@@ -205,6 +205,8 @@ didn't regress the >32KW path.
 
 ## 5. What's open
 
+- **Update: done, see IO_NOTES.md** -- disk transfers are interrupt-driven
+  and the caller sleeps; the filesystem is one sleep-lock. Original note:
 - **Every disk operation blocks the whole machine.** The kernel polls DSK
   with ION off (the same limitation as console input, KERNEL_NOTES.md §8).
   Interrupt-driven I/O with sleep/wakeup is the next structural step, and

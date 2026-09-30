@@ -6,6 +6,9 @@
 #include "../examples/console.h"
 #include "fs.h"
 #include "fsys.h"
+#include "ksync.h"
+#include "tty.h"
+#include "kdsk.h"
 
 /* ---- context exchange with kernel/kentry.s ------------------------------
  * kentry.s's entry paths write the interrupted user context here, and
@@ -42,8 +45,32 @@ unsigned int p_fixed[NPROC * NPAGES];
 unsigned int p_seg[NPROC * MAXSEG];
 unsigned int p_nseg[NPROC];
 
-int curproc = -1;
+int curproc = -1;           /* -1: the idle loop (or boot) */
 int loaded = -1;            /* whose page table is in map A */
+
+/* ---- kernel stacks and in-kernel sleep (IO_NOTES.md) --------------------
+ * Every process has its own kernel stack (kstk slice n; slice NPROC is the
+ * idle loop's). k_kbase/k_klim are the stack base/limit WORD addresses of
+ * whatever context is current; kentry.s loads them into 040/042 on every
+ * trap entry and before every return to user mode. A process asleep in
+ * the kernel keeps its frames on its own slice, plus its saved hardware
+ * stack registers and AC2/AC3/resume PC in p_k*. */
+static unsigned int kstk[(NPROC + 1) * KSTK];
+unsigned int k_kbase, k_klim;
+unsigned int k_ks_sp, k_ks_fp, k_ks_lim, k_ks_ac2, k_ks_ac3, k_ks_pc;
+volatile unsigned int k_ks_resumed;
+unsigned int k_n32 = 32;
+static unsigned int p_chan[NPROC], p_kin[NPROC];
+static unsigned int p_ksp[NPROC], p_kfp[NPROC], p_klim[NPROC];
+static unsigned int p_kac2[NPROC], p_kac3[NPROC], p_kpc[NPROC];
+static unsigned int fs_locked;
+unsigned int st_sleeps, st_idle;
+
+#define KSTK_FILL 0152525
+
+static unsigned int kstk_base(int slice) {
+    return (unsigned int)(unsigned long)&kstk[(unsigned int)slice * KSTK] >> 1;
+}
 
 /* statistics, printed at shutdown */
 unsigned int st_ticks, st_switches, st_syscalls, st_faults;
@@ -72,6 +99,7 @@ static int proc_alloc(unsigned int nwords, unsigned int base,
         if (p_state[s] == P_FREE) { n = s; break; }
     }
     if (n < 0) return -1;
+    p_state[n] = P_EMBRYO;      /* reserved while it's built: spawn sleeps */
 
     pt0 = (unsigned int)n * NPAGES;
     lastimg = (base + nwords - 1) >> 10;
@@ -218,7 +246,11 @@ static void proc_exit(int n, unsigned int status) {
         p_ac0[par] = status;            /* wait()'s return value */
         p_state[par] = P_RUN;
         p_state[n] = P_FREE;
-    } else if (par >= 0 && (p_state[par] == P_RUN || p_state[par] == P_WAIT)) {
+    } else if (par >= 0 && (p_state[par] == P_RUN || p_state[par] == P_WAIT ||
+                            p_state[par] == P_SLEEP)) {
+        /* a parent asleep inside the kernel (e.g. in spawn, on the disk)
+         * is alive too -- found when a child exited during its parent's
+         * next spawn and its slot was reused (IO_NOTES.md) */
         p_status[n] = status;
         p_state[n] = P_ZOMBIE;
     } else {
@@ -304,14 +336,35 @@ static void save_cur(void) {
     p_pc[curproc] = k_pc;
 }
 
+/* LMP k_ptbuf into user map A now (not deferred to k_resume): a process
+ * woken inside the kernel copies to/from its user memory through map A
+ * before it ever gets back to k_resume. */
+static void mapA_load(void) {
+    asm volatile(
+        "ESTA 2,k_ks_ac2,0\n\t"          /* scratch save of AC2/AC3 */
+        "ESTA 3,k_ks_ac3,0\n\t"
+        "SUB 0,0\n\t"
+        "DOA 0,MAP\n\t"                  /* select A, user mode off */
+        "ELDA 1,k_n32,0\n\t"
+        "ELEF 2,k_ptbuf,0\n\t"
+        "SUB 0,0\n\t"
+        "LMP\n\t"
+        "ELDA 2,k_ks_ac2,0\n\t"
+        "ELDA 3,k_ks_ac3,0\n\t"
+    );
+}
+
 static void load(int n) {
     int s;
     if (n != loaded) {
         for (s = 0; s < NPAGES; s++)
             k_ptbuf[s] = p_pt[(unsigned int)n * NPAGES + s];
-        k_reload = 1;
+        mapA_load();
+        k_reload = 0;
         loaded = n;
     }
+    k_kbase = kstk_base(n);
+    k_klim = k_kbase + KSTK - 16;
     if (n != curproc) st_switches++;
     curproc = n;
     k_ac0 = p_ac0[n];
@@ -333,23 +386,132 @@ static void shutdown(void) {
     kputu(st_faults);
     kputs(" free_frames=");
     kputu((unsigned int)pmm_frames_free());
+    kputs("\r\nkernel: io: sleeps=");
+    kputu(st_sleeps);
+    kputs(" idle=");
+    kputu(st_idle);
+    kputs(" tty_intr=");
+    kputu(tty_nintr);
+    kputs(" dsk_intr=");
+    kputu(dsk_nintr);
+    kputs(" dsk_sleeps=");
+    kputu(dsk_nsleep);
+    kputs("\r\nkernel: kernel stack high water (words of ");
+    kputu(KSTK);
+    kputs("):");
+    {
+        int sl;
+        unsigned int w;
+        for (sl = 0; sl <= NPROC; sl++) {
+            for (w = KSTK; w > 0; w--)
+                if (kstk[(unsigned int)sl * KSTK + w - 1] != KSTK_FILL) break;
+            kputs(" ");
+            kputu(w);
+        }
+    }
     kputs("\r\n");
     k_halt();
 }
 
-/* Round-robin: the next P_RUN slot after curproc (possibly curproc). */
+/* Switch to process n and never return here: either back into the kernel
+ * context it saved in ksleep(), or out to user mode via k_resume. */
+static void swtch_to(int n) {
+    load(n);
+    if (p_kin[n]) {
+        p_kin[n] = 0;
+        k_ks_sp = p_ksp[n];
+        k_ks_fp = p_kfp[n];
+        k_ks_lim = p_klim[n];
+        k_ks_ac2 = p_kac2[n];
+        k_ks_ac3 = p_kac3[n];
+        k_ks_pc = p_kpc[n];
+        k_ks_resumed = 1;
+        asm volatile("EJMP k_kswitch,0\n\t");
+    }
+    asm volatile("EJMP k_resume,0\n\t");
+}
+
+/* Nothing runnable, something asleep: idle with ION on, on its own stack. */
+static void idle(void) {
+    st_idle++;
+    curproc = -1;
+    k_kbase = kstk_base(NPROC);
+    k_klim = k_kbase + KSTK - 16;
+    asm volatile("EJMP k_idle,0\n\t");
+}
+
+/* Round-robin: the next P_RUN slot after curproc (possibly curproc).
+ * Never returns: every caller has already saved whatever it needs. */
 static void sched(void) {
-    int i, n;
-    n = curproc;
+    int i, n, sleepers;
+    n = curproc < 0 ? NPROC - 1 : curproc;
     for (i = 0; i < NPROC; i++) {
         n = n + 1;
         if (n >= NPROC) n = 0;
-        if (p_state[n] == P_RUN) {
-            load(n);
-            return;
-        }
+        if (p_state[n] == P_RUN) swtch_to(n);
     }
+    sleepers = 0;
+    for (i = 0; i < NPROC; i++)
+        if (p_state[i] == P_SLEEP) sleepers++;
+    if (sleepers) idle();
     shutdown();
+}
+
+/* ---- sleep / wakeup (ksync.h) ------------------------------------------ */
+
+int kcansleep(void) {
+    return curproc >= 0;
+}
+
+void wakeup(unsigned int chan) {
+    int i;
+    for (i = 0; i < NPROC; i++)
+        if (p_state[i] == P_SLEEP && p_chan[i] == chan) p_state[i] = P_RUN;
+}
+
+__attribute__((noinline)) void ksleep(unsigned int chan) {
+    p_chan[curproc] = chan;
+    p_state[curproc] = P_SLEEP;
+    st_sleeps++;
+    k_ks_resumed = 0;
+    asm volatile(
+        "ESTA 2,k_ks_ac2,0\n\t"
+        "ESTA 3,k_ks_ac3,0\n\t"
+        "LDA 0,040\n\t"
+        "ESTA 0,k_ks_sp,0\n\t"
+        "LDA 0,041\n\t"
+        "ESTA 0,k_ks_fp,0\n\t"
+        "LDA 0,042\n\t"
+        "ESTA 0,k_ks_lim,0\n\t"
+        "ELEF 0,ksleep_back,0\n\t"
+        "ESTA 0,k_ks_pc,0\n\t"
+        "ksleep_back:\n\t"
+    );
+    /* Second arrival (via k_kswitch): 040/041/042 and AC2/AC3 are back as
+     * they were above, so this frame is intact; just return. */
+    if (k_ks_resumed) return;
+    p_ksp[curproc] = k_ks_sp;
+    p_kfp[curproc] = k_ks_fp;
+    p_klim[curproc] = k_ks_lim;
+    p_kac2[curproc] = k_ks_ac2;
+    p_kac3[curproc] = k_ks_ac3;
+    p_kpc[curproc] = k_ks_pc;
+    p_kin[curproc] = 1;
+    save_cur();                 /* its user context, for when it returns */
+    sched();
+}
+
+/* The filesystem is one sleep-lock: a process may sleep on the disk in the
+ * middle of an fs operation, and nothing else may enter fs.c/the buffer
+ * cache until it is done (IO_NOTES.md). */
+static void fs_lock(void) {
+    while (fs_locked) ksleep(CHAN_FSLOCK);
+    fs_locked = 1;
+}
+
+static void fs_unlock(void) {
+    fs_locked = 0;
+    wakeup(CHAN_FSLOCK);
 }
 
 static void kill_cur(const char *why) {
@@ -393,7 +555,7 @@ static void do_syscall(void) {
     if (k_ac0 == SYS_PUTCHAR) {
         console_putchar((int)k_ac1);
     } else if (k_ac0 == SYS_GETCHAR) {
-        r = (unsigned int)console_getchar();
+        r = tty_getc();
     } else if (k_ac0 == SYS_GETPID) {
         r = (unsigned int)curproc;
     } else if (k_ac0 == SYS_SEGALLOC) {
@@ -426,28 +588,45 @@ static void do_syscall(void) {
             sched();
             return;
         }
-    } else if (k_ac0 == SYS_SPAWN) {
-        char path[FS_MAXPATH];
-        int c = -1;
-        if (ucopystr(k_ac1, path, FS_MAXPATH) == 0)
-            c = proc_spawn(path, curproc);
-        r = (unsigned int)c;
-    } else if (k_ac0 == SYS_OPEN) {
-        r = sys_open(k_ac1, k_ac2);
+    } else if (k_ac0 == SYS_SPAWN || k_ac0 == SYS_OPEN ||
+               k_ac0 == SYS_LSEEK || k_ac0 == SYS_MKDIR ||
+               k_ac0 == SYS_UNLINK || k_ac0 == SYS_FREEBLK ||
+               ((k_ac0 == SYS_READ || k_ac0 == SYS_WRITEFD) &&
+                !fsys_isconsole(k_ac1))) {
+        /* anything that can reach fs.c: under the fs lock. Arguments are
+         * copied to locals first -- k_ac* belong to whoever runs next
+         * once this process sleeps. */
+        unsigned int op = k_ac0, a1 = k_ac1, a2 = k_ac2, a3 = k_ac3;
+        fs_lock();
+        if (op == SYS_SPAWN) {
+            char path[FS_MAXPATH];
+            int c = -1;
+            if (ucopystr(a1, path, FS_MAXPATH) == 0)
+                c = proc_spawn(path, curproc);
+            r = (unsigned int)c;
+        } else if (op == SYS_OPEN) {
+            r = sys_open(a1, a2);
+        } else if (op == SYS_READ) {
+            r = sys_read(a1, a2, a3);
+        } else if (op == SYS_WRITEFD) {
+            r = sys_writefd(a1, a2, a3);
+        } else if (op == SYS_LSEEK) {
+            r = sys_lseek(a1, a2, a3);
+        } else if (op == SYS_MKDIR) {
+            r = sys_mkdir(a1);
+        } else if (op == SYS_UNLINK) {
+            r = sys_unlink(a1);
+        } else {
+            r = fs_freeblocks();
+        }
+        fs_unlock();
     } else if (k_ac0 == SYS_CLOSE) {
         r = sys_close(k_ac1);
     } else if (k_ac0 == SYS_READ) {
-        r = sys_read(k_ac1, k_ac2, k_ac3);
+        unsigned int a1 = k_ac1, a2 = k_ac2, a3 = k_ac3;
+        r = sys_read(a1, a2, a3);            /* console: may sleep */
     } else if (k_ac0 == SYS_WRITEFD) {
         r = sys_writefd(k_ac1, k_ac2, k_ac3);
-    } else if (k_ac0 == SYS_LSEEK) {
-        r = sys_lseek(k_ac1, k_ac2, k_ac3);
-    } else if (k_ac0 == SYS_MKDIR) {
-        r = sys_mkdir(k_ac1);
-    } else if (k_ac0 == SYS_UNLINK) {
-        r = sys_unlink(k_ac1);
-    } else if (k_ac0 == SYS_FREEBLK) {
-        r = fs_freeblocks();
     } else {
         r = 0177777;        /* -1: unknown syscall */
     }
@@ -480,17 +659,32 @@ static void k_trap2(int cause) {
 #else
 void k_trap(int cause) {
 #endif
-    if (cause == K_TICK) {
-        st_ticks++;
-        if ((k_mapstat & 1) == 0) {
-            /* would mean an interrupt reached the kernel itself, which
-             * the ION-off-in-kernel invariant says cannot happen */
-            kputs("\r\nkernel: PANIC tick with user mode off, mapstat=");
+    if (cause == K_TICK || cause == K_DEV) {
+        /* Interrupts reach the kernel only from user mode or from the idle
+         * loop (IO_NOTES.md). User mode off must mean idle. */
+        if ((k_mapstat & 1) == 0 && curproc >= 0) {
+            kputs("\r\nkernel: PANIC interrupt in the kernel, mapstat=");
             kputo(k_mapstat);
             kputs("\r\n");
             k_halt();
         }
-        save_cur();
+        if (cause == K_DEV) {
+            if (k_devcode == 010) tty_intr();
+            else if (k_devcode == 020) kdsk_intr();
+            else {
+                kputs("\r\nkernel: PANIC unexpected interrupt, device ");
+                kputo(k_devcode);
+                kputs("\r\n");
+                k_halt();
+            }
+            if (curproc >= 0) {             /* back to the same user code */
+                k_mapstat = P_MAPSTAT;      /* not the DIA readback */
+                return;
+            }
+            sched();                        /* from idle */
+        }
+        st_ticks++;
+        if (curproc >= 0) save_cur();
         sched();
         return;
     }
@@ -511,19 +705,23 @@ void k_trap(int cause) {
         else kill_cur("killed: validity fault (read or fetch, unmapped page)");
         return;
     }
-    kputs("\r\nkernel: PANIC unexpected interrupt, device ");
-    kputo(k_devcode);
-    kputs("\r\n");
+    kputs("\r\nkernel: PANIC unknown trap cause\r\n");
     k_halt();
 }
 
 /* PIT period: DOA loads the counter, which counts UP and interrupts on
  * wrapping past 0177777 (PROCESS_NOTES.md section 1). */
 unsigned int k_pitinit = 0177770;
-unsigned int k_pimask = 0103;    /* PI_TTI|PI_TTO|PI_DSK */
+unsigned int k_pimask = 0001;    /* PI_TTO only: TTI, DSK and PIT interrupt
+                                    (TTO output stays polled, IO_NOTES.md) */
 
 void k_start(void) {
+    unsigned int i;
+    for (i = 0; i < (NPROC + 1) * KSTK; i++) kstk[i] = KSTK_FILL;
+    tty_start();
     asm volatile(
+        "ELEF 0,k_stkflt,0\n\t"
+        "STA 0,043\n\t"            /* stack overflow -> k_stkflt (HALT) */
         "ELEF 0,k_int,0\n\t"
         "STA 0,1\n\t"
         "ELEF 0,k_syc,0\n\t"
@@ -531,14 +729,11 @@ void k_start(void) {
         "ELEF 0,k_flt,0\n\t"
         "STA 0,3\n\t"
         "ELDA 0,k_pimask,0\n\t"
-        "DOB 0,077\n\t"            /* MSKO: only the PIT may interrupt */
+        "DOB 0,077\n\t"            /* MSKO: PIT, TTI, DSK may interrupt */
         "ELDA 0,k_pitinit,0\n\t"
         "DOA 0,PIT\n\t"
         "NIOS PIT\n\t"             /* self-arming periodic tick */
-        "LDA 0,040\n\t"
-        "ESTA 0,k_stackbase,0\n\t" /* trap-entry kernel stack base */
     );
     curproc = -1;
-    sched();                       /* halts if nothing is runnable */
-    asm volatile("EJMP k_resume,0\n\t");
+    sched();                       /* never returns */
 }

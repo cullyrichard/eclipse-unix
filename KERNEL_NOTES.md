@@ -290,6 +290,9 @@ Each is written up where it belongs. Summary:
 
 ## 8. What's open
 
+- **Update: see IO_NOTES.md.** Console input and disk transfers now sleep
+  (per-process kernel stacks, sleep/wakeup, idle loop); the kernel itself
+  still runs with interrupts off.
 - **No preemption during a syscall.** The handler runs ION-off (SYSCALL_NOTES.md §7),
   so `SYS_GETCHAR` stalls every process until a key arrives. It needs
   interrupt-driven console and disk I/O with sleep/wakeup.

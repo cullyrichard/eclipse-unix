@@ -10,6 +10,7 @@
  * balloc) may evict them, so such code re-reads afterwards. */
 #include "fs.h"
 #include "../examples/dsk.h"
+#include "kdsk.h"
 
 #define NBUF 8
 
@@ -41,7 +42,7 @@ static unsigned int *bread(unsigned int blk) {
         if (!bvalid[i]) { v = i; break; }
         if (bage[i] < oldest) { oldest = bage[i]; v = i; }
     }
-    dsk_read_block(blk, &bdata[v * BWORDS]);
+    kdsk_read(blk, &bdata[v * BWORDS]);
     bblk[v] = blk;
     bvalid[v] = 1;
     bage[v] = ++bclock;
@@ -49,7 +50,7 @@ static unsigned int *bread(unsigned int blk) {
 }
 
 static void bwrite(unsigned int blk, unsigned int *b) {
-    dsk_write_block(blk, b);
+    kdsk_write(blk, b);
 }
 
 int fs_init(void) {

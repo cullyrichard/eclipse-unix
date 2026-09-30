@@ -15,6 +15,7 @@
 int uvalid(unsigned int b, unsigned int len);
 int ucopystr(unsigned int ub, char *k, unsigned int max);
 
+int fsys_isconsole(unsigned int fd);
 void fsys_procinit(int n);
 void fsys_procexit(int n);
 
