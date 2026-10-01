@@ -806,10 +806,10 @@ index 000000000..a0154fe9c
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp
 new file mode 100644
-index 000000000..a8eceba7b
+index 000000000..a6c33a4ba
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp
-@@ -0,0 +1,574 @@
+@@ -0,0 +1,591 @@
 +//===-- EclipseAsmPrinter.cpp - Eclipse LLVM assembly writer ------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -1169,6 +1169,23 @@ index 000000000..a8eceba7b
 +                                                bool *OddByte) {
 +  StringRef Target = getSymbol(MO.getGlobal())->getName();
 +  int64_t ByteOff = MO.getOffset();
++  // Offsets are 16-bit (the byte address space is 64KB), and arrive
++  // sign-extended: byte offset 33998 (element 16999 of an int array)
++  // shows up as -31538 and printed "big-15769", which dgasm rejects
++  // (DEBUGGING_NOTES.md #43). Mod 65536 the two readings are the same
++  // address, so let the object's own size decide: a negative offset whose
++  // +65536 reading lands inside the global is an in-bounds element past
++  // 16K words. Genuinely negative offsets (outside the object) keep their
++  // signed reading.
++  if (ByteOff < 0) {
++    const GlobalValue *GV = MO.getGlobal();
++    if (const auto *GVar = dyn_cast<GlobalVariable>(GV)) {
++      uint64_t Size =
++          GVar->getDataLayout().getTypeAllocSize(GVar->getValueType());
++      if (ByteOff + 65536 >= 0 && static_cast<uint64_t>(ByteOff + 65536) < Size)
++        ByteOff += 65536;
++    }
++  }
 +  bool Odd = (ByteOff & 1) != 0;
 +  if (OddByte)
 +    *OddByte = Odd;

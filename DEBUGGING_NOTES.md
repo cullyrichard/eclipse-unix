@@ -4338,7 +4338,7 @@ file, and refuses tapes with more files unless `--first-file` is
 given. The same program now boots and verifies all 17000 data words; a
 tape → `.ab` → tape round trip is byte-identical.
 
-### 43. Large global array, runtime index: `ELDA 1,big-15769` (OPEN)
+### 43. Large global array: `ELDA 1,big-15769` (FIXED, see end of entry)
 
 Found while building #42's test: a 17000-element `const unsigned int`
 array indexed by a loop counter (`big[i]`) produced an absolute operand
@@ -4346,3 +4346,21 @@ of the form `big - 15769`. dgasm rejects it ("Address out of range. Got
 -13766"). This looks like loop strength reduction folding a constant
 offset into the global's address, which goes negative for a large array.
 The test was rewritten to walk a pointer instead. Not yet investigated.
+
+**Root cause and fix** (llvm-project, `EclipseAsmPrinter::extendedAddrExpr`).
+It wasn't the loop at all: the test also printed `big[16999]`, a constant
+index. Its byte offset 33998 arrives sign-extended from 16 bits
+(-31538), and halving that gives -15769. Minimal repro
+(`examples/bigarray_offset_test.c`): `big[16384]` printed as `big-16384`,
+`big[16383]` correctly. Mod 65536 the two readings are the same address,
+so the printer now uses the object's size: when `offset + 65536` lands
+inside the global, it's an in-bounds element and is printed positive.
+Genuinely negative offsets keep their signed reading. Now prints
+`big+16384`/`big+16999`, runs `1234 77 88`; the original 17000-element
+`const` test passes `bad=0`; an initializer `&big[16999]` stores
+correctly. c-testsuite 206/220 in both modes, set unchanged.
+
+**Inherent limit, not a bug**: with byte pointers in a 16-bit address
+space, `ptrdiff_t` is 16 bits, so a pointer difference above 32767 bytes
+(more than 16383 ints within one object) overflows. That's undefined
+behavior in C (`&big[16999] - &big[0]` gives -15769).
