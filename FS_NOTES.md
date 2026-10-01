@@ -398,3 +398,42 @@ create/read). 736 frames remain free for processes (992 - 256).
 
 **Volatile**: everything written is lost at power-off. Saving the RAM
 disk back to tape is a natural next step; not done yet.
+
+## 10. Moving files on and off the machine: `tar` on magtape
+
+`/bin/tar` writes and reads **POSIX ustar** archives on magtape, one
+512-byte tar block per tape record, followed by two tape marks. The host
+converts between those tapes and ordinary `.tar` files, so a standard
+`tar` handles them on both sides:
+
+```
+on the Eclipse:  tar c [-u unit] path...   tar t [-u unit]   tar x [-u unit]
+host:            kernel/fstools/tar2tap.py in.tar in.tap   # host -> machine
+                 kernel/fstools/tap2tar.py out.tap out.tar # machine -> host
+```
+
+The default is unit 1, because unit 0 usually holds the boot tape.
+Leading `/` is stripped from names, as standard tar does. Kernel side:
+`SYS_TAPE` (36) does rewind / read one record / write one record / write
+tape mark / status on any unit. It uses the polled MTA driver
+`kernel/tape.c`, which the boot-time installer now shares.
+
+**Verified in SIMH:**
+- **host → Eclipse:** a GNU `tar --format=ustar` archive (two text files,
+  a directory, a 20000-byte random binary) listed and extracted. The
+  Eclipse `wc` counts match the host's exactly, including for the binary.
+- **Eclipse → host:** files created on the RAM-disk system, archived with
+  `tar c /home`, converted with `tap2tar.py`, are listed and extracted
+  by GNU tar without complaint. The binary copy of `/bin/sh`
+  is byte-identical (`cmp`).
+- **RAM-disk persistence:** after rebooting onto a fresh RAM disk,
+  `tar x` restored the files from that tape. So a diskless machine keeps
+  its work by saving to a data tape on unit 1 before power-off.
+
+**Limits:**
+- Records are at most 512 bytes. A foreign tape written with a larger
+  blocking factor can't be read: use `tar2tap.py`, which always writes
+  512-byte records.
+- Files are limited to 65535 bytes, and names to 99 characters.
+- No owners, modes or times: the filesystem has none.
+- Tape waits are polled, so the machine is busy while the tape moves.

@@ -21,51 +21,7 @@
 #include "fs.h"
 #include "../examples/console.h"
 
-#define MTA_REWIND 010          /* CU_REWIND << 3, unit 0 */
-#define MTA_READ   0            /* CU_READ << 3, unit 0 */
-#define ST1_EOF    0400
-#define ST1_RDY    01
-#define ST1_REW    020000
-
-static unsigned int tbuf[256];
-
-static unsigned int mta_st1(void) {
-    unsigned int s;
-    asm volatile("DIA %0,022" : "=r"(s));
-    return s;
-}
-
-static unsigned int mta_done(void) {
-    unsigned int r;
-    asm volatile("SUB %0,%0\n\tSKPDZ 022\n\tINC %0,%0" : "=r"(r));
-    return r;
-}
-
-static void mta_rewind(void) {
-    asm volatile("DOA %0,022" :: "r"((unsigned int)MTA_REWIND));
-    asm volatile("NIOS 022");
-    while ((mta_st1() & ST1_REW) || !(mta_st1() & ST1_RDY))
-        ;
-}
-
-/* Read the next record into tbuf (at most 256 words). Returns the number
- * of words transferred, 0 for a tape mark, -1 for an error. */
-static int mta_read(void) {
-    unsigned int wa, st, ma;
-    wa = (unsigned int)(unsigned long)tbuf >> 1;
-    asm volatile("DOB %0,022" :: "r"(wa));
-    asm volatile("DOC %0,022" :: "r"((unsigned int)0177400));   /* -256 */
-    asm volatile("DOA %0,022" :: "r"((unsigned int)MTA_READ));
-    asm volatile("NIOS 022");
-    while (!mta_done())
-        ;
-    st = mta_st1();
-    asm volatile("DIB %0,022" : "=r"(ma));
-    asm volatile("NIOC 022");
-    if (st & ST1_EOF) return 0;
-    if (st & 0100000) return -1;            /* error summary bit */
-    return (int)(ma - wa);
-}
+#include "tape.h"
 
 int tape_install(void) {
     int n, c;
@@ -80,10 +36,10 @@ int tape_install(void) {
         kputs("\r\n");
         if (c != 'y' && c != 'Y') return -1;
     }
-    mta_rewind();
+    mta_rewind(0);
     skipped = 0;                             /* file 1: bootstrap + kernel */
     for (;;) {
-        n = mta_read();
+        n = mta_read(0);
         if (n == 0) break;
         if (n < 0) { kputs("kernel: tape read error in file 1\r\n"); return -1; }
         skipped++;
@@ -92,7 +48,7 @@ int tape_install(void) {
     kputu(skipped);
     kputs(" boot records; copying filesystem");
     for (blk = 0;; blk++) {
-        n = mta_read();
+        n = mta_read(0);
         if (n == 0) break;
         if (n != 256) {
             kputs("\r\nkernel: bad filesystem record ");
@@ -100,7 +56,7 @@ int tape_install(void) {
             kputs("\r\n");
             return -1;
         }
-        if (blk >= bdev_nblocks() || bdev_write(blk, tbuf) != 0) {
+        if (blk >= bdev_nblocks() || bdev_write(blk, mta_buf) != 0) {
             kputs("\r\nkernel: disk write failed at block ");
             kputu(blk);
             kputs("\r\n");

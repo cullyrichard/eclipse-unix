@@ -8,6 +8,7 @@
 #include "fsys.h"
 #include "ksync.h"
 #include "tty.h"
+#include "tape.h"
 #include "bdev.h"
 
 /* ---- context exchange with kernel/kentry.s ------------------------------
@@ -704,6 +705,8 @@ static void do_syscall(void) {
             sched();
             return;
         }
+    } else if (k_ac0 == SYS_TAPE) {
+        r = sys_tape(k_ac1, k_ac2, k_ac3);
     } else if (k_ac0 == SYS_SPAWN || k_ac0 == SYS_SPAWNV) {
         /* Under the fs lock: loading the image can sleep on the disk, and
          * `path` and the argv staging buffer are shared statics that the

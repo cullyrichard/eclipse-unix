@@ -28,7 +28,7 @@ case "$kdisk" in
 esac
 echo "$kdisk" > "$out/kdisk"
 
-progs="init sh echo cat ls mkdir rm wc cp pwd fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
+progs="init sh tar echo cat ls mkdir rm wc cp pwd fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
 files=()
 for p in $progs; do
   ECLIPSE_CC_KEEP_ASM="$out/$p.s" "$cc" --ieee ${UCFLAGS:-} -o "$out/$p.simh" \
@@ -42,7 +42,7 @@ build_kernel() {
 # Pass 1 uses 1536; pass 2 uses main's static worst case + 64.
 ECLIPSE_STACK_WORDS=${bootstk:-1536} ECLIPSE_CC_KEEP_ASM="$out/kernel.s" "$cc" --ieee -o "$out/kernel.simh" -DPMM_POLL=tty_poll ${KCFLAGS:-} "$@" \
   "$here/kmain.c" "$here/proc.c" "$here/kmem.c" "$here/kio.c" \
-  "$here/fs.c" "$here/fsys.c" "$here/tty.c" "$here/tapeinst.c" "${bdev_src[@]}" \
+  "$here/fs.c" "$here/fsys.c" "$here/tty.c" "$here/tapeinst.c" "$here/tape.c" "${bdev_src[@]}" \
   "$here/../examples/pmm.c" "$here/../examples/console.c" \
   "$here/kentry.s"
 

@@ -109,3 +109,8 @@ int ustrcmp(const char *a, const char *b) {
     return ((int)*a & 255) - ((int)*b & 255);
 }
 void uputsfd(int fd, const char *s) { write(fd, s, ustrlen(s)); }
+
+/* magtape (kernel/tape.h): op TP_*, unit 0-7; buf even-aligned, <= 512 bytes */
+int tape(int op, int unit, char *buf, int n) {
+    return __syscall3(SYS_TAPE, (op & 0377) | (unit << 8), (int)buf, n);
+}

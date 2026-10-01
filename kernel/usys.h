@@ -45,4 +45,13 @@ int stat(const char *path, unsigned int *st);  /* inum, type (1 file, 2 dir), nl
 int ustrcmp(const char *a, const char *b);
 void uputsfd(int fd, const char *s);
 
+/* magtape: tape(TP_*, unit, buf, nbytes) -- one record of at most 512
+ * bytes per call; TP_READ returns 0 at a tape mark */
+#define TP_REWIND 1
+#define TP_READ   2
+#define TP_WRITE  3
+#define TP_WEOF   4
+#define TP_STATUS 5
+int tape(int op, int unit, char *buf, int n);
+
 #endif

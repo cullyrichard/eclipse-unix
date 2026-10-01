@@ -53,5 +53,8 @@
 #define SYS_DUP2     33   /* fd, newfd (closes newfd first) -> newfd */
 #define SYS_PIPE     34   /* int fds[2] -> 0; fds[0] read end, fds[1] write end */
 #define SYS_STAT     35   /* path, unsigned st[4] = {inum, type, nlink, size} */
+#define SYS_TAPE     36   /* op | unit<<8, buf, nbytes (kernel/tape.h TP_*):
+                             rewind, read/write one record (<= 512 bytes,
+                             even address), write tape mark, status */
 
 #endif
