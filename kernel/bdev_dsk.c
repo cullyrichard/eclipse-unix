@@ -21,6 +21,7 @@ static unsigned int dsk_busy, dsk_done, dsk_status;
 unsigned int bdev_nintr, bdev_nsleep;        /* statistics */
 unsigned int bdev_pimask = 0;                /* DSK interrupts are used */
 unsigned int bdev_devcode = 020;
+unsigned int bdev_volatile = 0;
 
 int bdev_init(void) { return 0; }
 unsigned int bdev_nblocks(void) { return DSK_MAX_BLOCK + 1; }

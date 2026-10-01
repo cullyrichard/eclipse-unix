@@ -7,6 +7,7 @@ out="${OUT:-$here/out}"
 {
   case "$(cat "$out/kdisk" 2>/dev/null || echo dsk)" in
     dkp) echo "set dkp0 4231"; echo "attach dkp0 $out/disk.img" ;;
+    ram) echo "attach mta0 $out/install.tap" ;;    # no disk: FS comes from tape
     *)   echo "attach dsk $out/disk.img" ;;
   esac
   cat "$out/kernel.simh"

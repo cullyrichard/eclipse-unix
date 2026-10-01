@@ -4364,3 +4364,32 @@ correctly. c-testsuite 206/220 in both modes, set unchanged.
 space, `ptrdiff_t` is 16 bits, so a pointer difference above 32767 bytes
 (more than 16383 ints within one object) overflows. That's undefined
 behavior in C (`&big[16999] - &big[0]` gives -15769).
+
+### 44. Page zero ran out again (Zebra kernel): skip-inverted long jumps (changed)
+
+#40 replaced out-of-range `JMP`s with `EJMP` when the previous
+instruction can't skip. The remaining ones, the compiler's conditional
+branches (an ALU instruction with a skip field, then `JMP`), still took a
+page-zero slot each. The largest kernel (Zebra) ran out again. These
+are now rewritten with the skip inverted:
+
+```
+ALU ..,SZC          ALU ..,SNC        ; SZC/SNC, SZR/SNR, SEZ/SBN
+JMP far      ->     JMP Lrx_n         ; original "skip" path continues
+                    EJMP far,0        ; original "jump" path
+                  Lrx_n:
+```
+
+They only apply when the skip immediately precedes the `JMP` with no
+label in between (otherwise something may jump to the `JMP` directly, and
+the slot method is kept). Kernel page-zero slots went from 25 to 1;
+c-testsuite 206/220 both modes, same set; the kernel and shell tests pass.
+
+**A real bug this exposed in `kernel/stackdepth.py`**: it took any label
+not matching `LBB|CPI|L<digit>` as a function start. The new `Lrx_`
+labels therefore split functions and dropped their later calls from the
+call graph, so the worst case "fell" from 658 to 423 words and
+`build.sh` would have sized the kernel stacks too small. Caught because
+a jump-layout change can't change stack depth. `stackdepth.py` and
+`gapprof.py` now skip `Lrx_` labels, and the numbers are back to 658
+(dsk) ... 811 (zebra).

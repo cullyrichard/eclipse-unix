@@ -9,7 +9,7 @@ spec = importlib.util.spec_from_file_location('r', os.path.join(here, '..', 'ecl
 r = importlib.util.module_from_spec(spec); spec.loader.exec_module(r)
 la, _, _ = r.compute_addresses(open(sys.argv[2]).read().splitlines())
 top = int(sys.argv[3]) if len(sys.argv) > 3 else 8
-funcs = sorted((a, n) for n, a in la.items() if not re.match(r'(LBB|CPI|L\d|var)', n) and (n[0].islower() or n.startswith('k_')))
+funcs = sorted((a, n) for n, a in la.items() if not re.match(r'(LBB|CPI|L\d|Lrx_|var)', n) and (n[0].islower() or n.startswith('k_')))
 starts = [a for a, n in funcs]
 import bisect
 def fn(pc):

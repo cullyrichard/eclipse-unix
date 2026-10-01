@@ -70,11 +70,16 @@ static int mta_read(void) {
 int tape_install(void) {
     int n, c;
     unsigned int blk, skipped;
-    kputs("kernel: no filesystem on the disk. Install one from tape unit 0? [y/N] ");
-    c = console_getchar() & 0177;
-    console_putchar(c);
-    kputs("\r\n");
-    if (c != 'y' && c != 'Y') return -1;
+    if (bdev_volatile) {
+        /* RAM disk: nothing to overwrite, no question to ask */
+        kputs("kernel: loading the filesystem into memory from tape unit 0\r\n");
+    } else {
+        kputs("kernel: no filesystem on the disk. Install one from tape unit 0? [y/N] ");
+        c = console_getchar() & 0177;
+        console_putchar(c);
+        kputs("\r\n");
+        if (c != 'y' && c != 'Y') return -1;
+    }
     mta_rewind();
     skipped = 0;                             /* file 1: bootstrap + kernel */
     for (;;) {

@@ -35,6 +35,7 @@
 
 unsigned int bdev_pimask = 0400;    /* PI_DKP: polled */
 unsigned int bdev_devcode = 0;
+unsigned int bdev_volatile = 0;
 unsigned int bdev_nintr, bdev_nsleep;
 
 int bdev_init(void) { return 0; }

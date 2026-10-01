@@ -289,6 +289,37 @@ def _cannot_skip(insn) -> bool:
     return op in NO_SKIP or bool(ALU_RE.match(op))
 
 
+_SKIP_INVERSE = {"SZC": "SNC", "SNC": "SZC", "SZR": "SNR", "SNR": "SZR",
+                 "SEZ": "SBN", "SBN": "SEZ"}
+relax_label = [0]
+
+
+def _prev_insn_index(lines, i):
+    for j in range(i - 1, -1, -1):
+        st = lines[j].split("//", 1)[0].strip()
+        if not st:
+            continue
+        if LABEL_RE.match(st) or VAR_DECL_RE.match(lines[j]) or DEV_RE.match(lines[j]) \
+                or ORG_RE.match(lines[j]):
+            return None             # a label in between: someone may jump here
+        return j
+    return None
+
+
+def _inverted_skip(line):
+    """The ALU instruction on `line` with its skip field inverted, or None
+    if it isn't an ALU op with an invertible skip."""
+    code, _, comment = line.partition("//")
+    m = re.match(r"^(\s*)(\S+)\s+(.*?)\s*$", code)
+    if not m or not ALU_RE.match(m.group(2)):
+        return None
+    ops = [o.strip() for o in m.group(3).split(",")]
+    if len(ops) < 3 or ops[-1] not in _SKIP_INVERSE:
+        return None
+    ops[-1] = _SKIP_INVERSE[ops[-1]]
+    return f"{m.group(1)}{m.group(2)} {','.join(ops)}" + (f" //{comment}" if comment else "")
+
+
 def relax_long_jumps(text: str) -> str:
     lines = text.splitlines()
     declared_slots = {
@@ -297,7 +328,8 @@ def relax_long_jumps(text: str) -> str:
         if (m := VAR_DECL_RE.match(line)) and m.group(1).endswith("_SLOT")
     }
 
-    for _ in range(50):  # bounded fixed-point iteration; see module doc
+    for _ in range(2000):  # bounded fixed-point iteration (each skip
+                           # inversion restarts the scan); see module doc
         label_addr, line_addr, _end_addr = compute_addresses(lines)
         new_slots = []
         changed = False
@@ -330,6 +362,22 @@ def relax_long_jumps(text: str) -> str:
                 lines[i] = f"{indent}EJMP {target},0"
                 changed = True
                 continue
+            # After an ALU skip (the compiler's conditional-branch idiom),
+            # invert the skip and jump over a 2-word EJMP -- no page-zero
+            # slot (DEBUGGING_NOTES.md #44):
+            #   ALU ..,SZC / JMP far   ->   ALU ..,SNC / JMP Lx / EJMP far / Lx:
+            # original skips (cond true)  -> new doesn't skip -> JMP Lx
+            # original jumps (cond false) -> new skips JMP Lx -> EJMP far
+            pj = _prev_insn_index(lines, i)
+            inv = _inverted_skip(lines[pj]) if pj is not None else None
+            if inv is not None and pj == i - 1:
+                relax_label[0] += 1
+                lab = f"Lrx_{relax_label[0]}"
+                lines[pj] = inv
+                lines[i:i + 1] = [f"{indent}JMP {lab}", f"{indent}EJMP {target},0", f"{lab}:"]
+                changed = True
+                break                   # line indexes shifted: recompute
+
             slot = target + "_SLOT"
             lines[i] = f"{indent}JMP @{slot},0"
             changed = True

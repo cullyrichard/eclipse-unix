@@ -12,6 +12,8 @@
  *   zebra   bdev_dskp.c  DG 6060/6061/6067 DG/Disc (device 027). Polled.
  *   vulcan  bdev_dskp.c  DG 6122 DG/Disc (device 027). Polled.
  *   kismet  bdev_dskp.c  DG 6160/6161/6214 DG/Disk (device 027). Polled.
+ *   ram     bdev_ram.c   RAM disk in physical memory (needs no disk;
+ *                        loaded from the boot tape, volatile).
  *
  * Compile-time selection, not an ops table: DSKP_FAMILY_NOTES.md allows
  * one DSKP generation per build, and a struct of function pointers would
@@ -31,6 +33,9 @@ void bdev_intr(void);                   /* BDEV_DEVCODE interrupt */
 /* MSKO bits this backend needs masked (polled backends mask their own
  * completion interrupt), and the device code bdev_intr() serves (0: none). */
 extern unsigned int bdev_pimask, bdev_devcode;
+/* 1: contents don't survive power-off (RAM disk) -- tapeinst.c loads the
+ * filesystem from tape without asking. */
+extern unsigned int bdev_volatile;
 extern unsigned int bdev_nintr, bdev_nsleep;   /* statistics */
 
 #endif

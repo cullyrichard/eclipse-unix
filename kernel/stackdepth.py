@@ -14,7 +14,7 @@ frame, calls, pushes, cur = {}, {}, {}, None
 for l in L:
     s = l.split('//')[0].strip()
     m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*):', s)
-    if m and not re.match(r'(LBB|CPI|L\d)', m.group(1)):
+    if m and not re.match(r'(LBB|CPI|L\d|Lrx_)', m.group(1)):
         cur = m.group(1); calls.setdefault(cur, set()); pushes.setdefault(cur, 0); continue
     if cur is None: continue
     m = re.match(r'SAVE\s+(\d+)', s)
@@ -28,7 +28,7 @@ cur = None; run = 0
 for l in L:
     s = l.split('//')[0].strip()
     m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*):', s)
-    if m and not re.match(r'(LBB|CPI|L\d)', m.group(1)):
+    if m and not re.match(r'(LBB|CPI|L\d|Lrx_)', m.group(1)):
         cur = m.group(1); run = 0; pushcount[cur] = 0; continue
     if cur is None: continue
     if re.match(r'ISZ\s+040', s): run += 1; pushcount[cur] = max(pushcount[cur], run)

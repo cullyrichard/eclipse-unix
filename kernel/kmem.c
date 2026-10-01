@@ -134,3 +134,73 @@ void kcopyout_word(unsigned int uaddr, unsigned int val) {
         "ELDA 3,_k_save3,0\n\t"
     );
 }
+
+/* Block copies between a physical frame and a kernel buffer (the RAM disk,
+ * bdev_ram.c): map B is loaded ONCE, then each word is one single-cycle
+ * mapped access plus one ordinary kernel access -- unlike kfar_read/
+ * kfar_write, which reload the map for every word. n <= 1024 - off.
+ * Callers keep n small (64) and poll the console between chunks
+ * (KERNEL_NOTES.md section 12). noinline: the asm labels must exist once. */
+static unsigned int _k_dst, _k_cnt;
+
+__attribute__((noinline))
+void kfar_bget(unsigned int pfn, unsigned int off, unsigned int *buf, unsigned int n) {
+    if (n == 0) return;
+    kfar_setB(pfn);
+    _k_off = off & 01777;
+    _k_dst = (unsigned int)(unsigned long)buf >> 1;   /* word address */
+    _k_cnt = n;
+    asm volatile(
+        "ESTA 2,_k_save2,0\n\t"
+        "ESTA 3,_k_save3,0\n\t"
+        "kfar_bget_loop:\n\t"
+        "ELDA 2,_k_off,0\n\t"
+        "NIOP MAP\n\t"
+        "ELDA 3,0,2\n\t"           /* the mapped read (through B) */
+        "ELDA 2,_k_dst,0\n\t"
+        "ESTA 3,0,2\n\t"           /* ordinary store into the buffer */
+        "ELDA 0,_k_off,0\n\t"
+        "INC 0,0\n\t"
+        "ESTA 0,_k_off,0\n\t"
+        "ELDA 0,_k_dst,0\n\t"
+        "INC 0,0\n\t"
+        "ESTA 0,_k_dst,0\n\t"
+        "EDSZ _k_cnt,0\n\t"        /* skips the JMP when the count hits 0 */
+        "JMP kfar_bget_loop\n\t"
+        "SUB 0,0\n\t"
+        "DOA 0,MAP\n\t"            /* back to select A, enable A */
+        "ELDA 2,_k_save2,0\n\t"
+        "ELDA 3,_k_save3,0\n\t"
+    );
+}
+
+__attribute__((noinline))
+void kfar_bput(unsigned int pfn, unsigned int off, const unsigned int *buf, unsigned int n) {
+    if (n == 0) return;
+    kfar_setB(pfn);
+    _k_off = off & 01777;
+    _k_dst = (unsigned int)(unsigned long)buf >> 1;
+    _k_cnt = n;
+    asm volatile(
+        "ESTA 2,_k_save2,0\n\t"
+        "ESTA 3,_k_save3,0\n\t"
+        "kfar_bput_loop:\n\t"
+        "ELDA 2,_k_dst,0\n\t"
+        "ELDA 3,0,2\n\t"           /* ordinary load from the buffer */
+        "ELDA 2,_k_off,0\n\t"
+        "NIOP MAP\n\t"
+        "ESTA 3,0,2\n\t"           /* the mapped write (through B) */
+        "ELDA 0,_k_off,0\n\t"
+        "INC 0,0\n\t"
+        "ESTA 0,_k_off,0\n\t"
+        "ELDA 0,_k_dst,0\n\t"
+        "INC 0,0\n\t"
+        "ESTA 0,_k_dst,0\n\t"
+        "EDSZ _k_cnt,0\n\t"
+        "JMP kfar_bput_loop\n\t"
+        "SUB 0,0\n\t"
+        "DOA 0,MAP\n\t"
+        "ELDA 2,_k_save2,0\n\t"
+        "ELDA 3,_k_save3,0\n\t"
+    );
+}

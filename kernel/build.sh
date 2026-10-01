@@ -5,7 +5,7 @@
 #   UCFLAGS=..  extra flags for the user programs (e.g. -DROUNDS=200)
 #   KCFLAGS=..  extra flags for the kernel (e.g. -DKDEBUG)
 #   KEEPDISK=1  keep an existing out/disk.img (to test persistence)
-#   KDISK=dsk|dkp|zebra|vulcan|kismet   block-device backend (bdev.h;
+#   KDISK=dsk|dkp|zebra|vulcan|kismet|ram   block-device backend (bdev.h;
 #               default dsk). dkp = DG 4231 on SIMH DKP; zebra/vulcan/
 #               kismet = the real DG/Disc drives, not runnable in SIMH.
 #   EXTRA="host:/fs/path ..."  more files for the image (e.g. an /etc/rc)
@@ -23,6 +23,7 @@ case "$kdisk" in
   zebra)  bdev_src=("-DDSKP_VARIANT_ZEBRA" "-DDSKP_BLOCK16" "$here/bdev_dskp.c" "$here/../examples/zebra.c" "$here/../examples/dskp_common.c"); mkfs_args=(-n 65535 -i 1024) ;;
   vulcan) bdev_src=("-DDSKP_VARIANT_VULCAN" "-DDSKP_BLOCK16" "$here/bdev_dskp.c" "$here/../examples/vulcan.c" "$here/../examples/dskp_common.c"); mkfs_args=(-n 65535 -i 1024) ;;
   kismet) bdev_src=("-DDSKP_VARIANT_KISMET" "$here/bdev_dskp.c" "$here/../examples/kismet.c" "$here/../examples/dskp_common.c"); mkfs_args=(-n 65535 -i 1024) ;;
+  ram)    bdev_src=("$here/bdev_ram.c"); mkfs_args=(-n 1024 -i 128) ;;
   *) echo "build.sh: unknown KDISK=$kdisk" >&2; exit 1 ;;
 esac
 echo "$kdisk" > "$out/kdisk"

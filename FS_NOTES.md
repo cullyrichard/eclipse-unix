@@ -366,3 +366,35 @@ It's worth revisiting with a second disk controller, or with a workload
 that mixes heavy cached reads with heavy writes. Re-measure with
 `FSLOCK_STATS` (this needs the interrupt-driven DSK backend; the polled
 backends hold the CPU during a transfer anyway).
+
+## 9. Running with no disk: the RAM disk (`KDISK=ram`)
+
+`kernel/bdev_ram.c` keeps the filesystem in physical memory above the
+kernel's own 32KW: 1024 blocks (`RAM_BLOCKS`), i.e. 256 1KW frames from the
+page allocator, a quarter of a 1MW S/140. The kernel reaches it through
+the MMU exactly as it reaches process memory: user map B pointed at the
+frame, then single-cycle mapped accesses. New `kmem.c` block copies
+(`kfar_bget`/`kfar_bput`) load the map once per 64-word chunk instead of
+once per word.
+
+Boot is a single tape: `KDISK=ram kernel/build.sh`, then boot
+`install.tap`. The kernel comes off file 1. The RAM disk's superblock is
+zeroed at init, because real memory powers up with garbage. The kernel then
+finds no filesystem and loads file 2 into memory *without asking*,
+since there's nothing to overwrite:
+
+```
+kernel: loading the filesystem into memory from tape unit 0
+kernel: skipped 9 boot records; copying filesystem..
+kernel: installed 115 blocks
+kernel: disk ram (physical memory, volatile)
+kernel: fs mounted, free_blocks=909
+```
+
+**Verified in SIMH with no disk attached** (`show dsk`: not attached):
+`boot mta0`, then autotest (`fstest` 40/40, three concurrent writers
+`errs=0`, `badptr` killed) and an interactive session (pipes, file
+create/read). 736 frames remain free for processes (992 - 256).
+
+**Volatile**: everything written is lost at power-off. Saving the RAM
+disk back to tape is a natural next step; not done yet.
