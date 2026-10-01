@@ -122,6 +122,7 @@ static int proc_alloc(unsigned int nwords, unsigned int base,
     kputs("\r\n");
 #endif
     for (s = 0; s < NPAGES; s++) {
+        tty_poll();             /* 32 PTEs + zero-fill: section 11 */
         p_pt[pt0 + s] = PTE_INVALID | ((unsigned int)s << 10);
         p_fixed[pt0 + s] = 0;
         if ((unsigned int)s <= lastimg ||
@@ -179,7 +180,10 @@ static void args_one(const char *path) {
     unsigned int i;
     kargc = 1;
     kargoff[0] = 0;
-    for (i = 0; path[i] && i < ARGMAX - 1; i++) kargs[i] = path[i];
+    for (i = 0; path[i] && i < ARGMAX - 1; i++) {
+        if ((i & 15) == 0) tty_poll();
+        kargs[i] = path[i];
+    }
     kargs[i] = 0;
     kargn = i + 1;
 }
@@ -286,12 +290,15 @@ static void proc_free(int n) {
     /* fixed pages only: a window page points at a segment frame, which is
      * freed exactly once below via p_seg */
     for (s = 0; s < NPAGES; s++) {
+        if ((s & 3) == 0) tty_poll();
         pte = p_pt[pt0 + s];
         if (p_fixed[pt0 + s] && pte_valid(pte))
             pmm_free_page((int)(pte & 01777));
     }
-    for (s = 0; (unsigned int)s < p_nseg[n]; s++)
+    for (s = 0; (unsigned int)s < p_nseg[n]; s++) {
+        if ((s & 3) == 0) tty_poll();
         pmm_free_page((int)p_seg[sg0 + s]);
+    }
     p_nseg[n] = 0;
     fsys_procexit(n);
     if (loaded == n) loaded = -1;
@@ -481,7 +488,7 @@ static void shutdown(void) {
         int sl;
         unsigned int w;
         for (sl = 0; sl <= NPROC; sl++) {
-            for (w = KSTK; w > 0; w--)
+            for (w = KSTK; w > 0; w--, (w & 31) || (tty_poll(), 0))
                 if (kstk[(unsigned int)sl * KSTK + w - 1] != KSTK_FILL) break;
             kputs(" ");
             kputu(w);
@@ -818,7 +825,10 @@ unsigned int k_pimask = 0177777 & ~(01000u | 02u);
 
 void k_start(void) {
     unsigned int i;
-    for (i = 0; i < (NPROC + 1) * KSTK; i++) kstk[i] = KSTK_FILL;
+    for (i = 0; i < (NPROC + 1) * KSTK; i++) {
+        if ((i & 31) == 0) tty_poll();
+        kstk[i] = KSTK_FILL;
+    }
     if (bdev_devcode)           /* interrupt-driven disk backend (DSK) */
         k_pimask &= ~0100u;
     asm volatile("NIOC 022");   /* MTA: drop Done left by the tape boot */

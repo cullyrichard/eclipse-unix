@@ -85,7 +85,10 @@ static unsigned int balloc(void) {
             b[(blk >> 4) & 0377] |= bitmask[blk & 15];
             bwrite(s_bmap + (blk >> 12), b);
             b = bread(blk);
-            for (i = 0; i < BWORDS; i++) b[i] = 0;
+            for (i = 0; i < BWORDS; i++) {
+                if ((i & 31) == 0) tty_poll();
+                b[i] = 0;
+            }
             bwrite(blk, b);
             return blk;
         }
@@ -121,6 +124,7 @@ unsigned int fs_freeblocks(void) {
 
 int fs_iread(unsigned int inum, unsigned int *ip) {
     unsigned int *b, i, o;
+    tty_poll();                 /* ~690 instructions per call (section 11) */
     if (inum == 0 || inum >= s_ninodes) return -1;
     b = bread(s_istart + inum / IPB);
     o = (inum % IPB) * IWORDS;
@@ -130,6 +134,7 @@ int fs_iread(unsigned int inum, unsigned int *ip) {
 
 void fs_iwrite(unsigned int inum, const unsigned int *ip) {
     unsigned int *b, i, o;
+    tty_poll();
     if (inum == 0 || inum >= s_ninodes) return;
     b = bread(s_istart + inum / IPB);
     o = (inum % IPB) * IWORDS;
@@ -280,6 +285,7 @@ unsigned int fs_dirlookup(unsigned int dinum, const char *name) {
     char de[DENTSZ];
     if (fs_iread(dinum, ip) < 0 || ip[I_TYPE] != T_DIR) return 0;
     for (off = 0; off + DENTSZ <= ip[I_SIZE]; off += DENTSZ) {
+        tty_poll();
         if (fs_readi(dinum, off, de, DENTSZ) != DENTSZ) return 0;
         inum = dent_inum(de);
         if (inum != 0 && namematch(name, de + 2)) return inum;
@@ -294,6 +300,7 @@ int fs_dirlink(unsigned int dinum, const char *name, unsigned int inum) {
     if (name[0] == 0 || fs_dirlookup(dinum, name) != 0) return -1;
     if (fs_iread(dinum, ip) < 0 || ip[I_TYPE] != T_DIR) return -1;
     for (off = 0; off + DENTSZ <= ip[I_SIZE]; off += DENTSZ) {
+        tty_poll();
         fs_readi(dinum, off, de, DENTSZ);
         if (dent_inum(de) == 0) break;          /* reuse a free slot */
     }
@@ -313,6 +320,7 @@ int fs_dirunlink(unsigned int dinum, const char *name) {
     int i;
     if (fs_iread(dinum, ip) < 0) return -1;
     for (off = 0; off + DENTSZ <= ip[I_SIZE]; off += DENTSZ) {
+        tty_poll();
         fs_readi(dinum, off, de, DENTSZ);
         if (dent_inum(de) != 0 && namematch(name, de + 2)) {
             for (i = 0; i < DENTSZ; i++) de[i] = 0;
@@ -347,6 +355,7 @@ static unsigned int walk(const char *path, int parent, char *name) {
     const char *rest;
     char elem[DIRSIZ + 1];
     for (;;) {
+        tty_poll();
         rest = skipelem(path, elem);
         if (rest == 0) return 0;                /* component too long */
         if (elem[0] == 0) return parent ? 0 : cur;
@@ -431,6 +440,7 @@ static int dir_empty(unsigned int dinum) {
     char de[DENTSZ];
     fs_iread(dinum, ip);
     for (off = 2 * DENTSZ; off + DENTSZ <= ip[I_SIZE]; off += DENTSZ) {
+        tty_poll();
         fs_readi(dinum, off, de, DENTSZ);
         if (dent_inum(de) != 0) return 0;
     }

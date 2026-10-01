@@ -576,3 +576,40 @@ collide; human typing cannot. A complete fix needs the kernel to run with
 interrupts enabled, which is a much larger change. Polling overhead:
 12,323 polls for the whole sweep workload, about 300K instructions,
 negligible.
+
+## 12. Keystroke latency, measured from a full trace
+
+Section 11's sweep *sampled* latency at 60-120 injection points, and each
+sweep turned up a different slow spot. `kernel/gapprof.py` measures it
+directly instead: from a complete SIMH instruction trace of the I/O
+workload (deterministic clock, `d debug 100003`), it lists every kernel
+stretch that runs with interrupts off and without calling `tty_poll()`,
+longest first, with a per-function profile. The longest such stretch is
+the worst-case delay before a typed character is taken.
+
+| step | longest unpolled stretch (whole run, boot and shutdown included) |
+|---|---|
+| start of this pass | 177,014 (boot stack fill); steady state about 5,000 (path lookup) |
+| polls in path lookup, `fs_iread`, dir scans, `args_one`, boot loops | 12,719 (kernel console messages) |
+| poll per character in `kputs`/`kputbase` | 3,269 (`fs_iread` every 4th call) |
+| poll every `fs_iread`/`fs_iwrite`, `proc_alloc` per page, pmm scans every 16 | **1,936** |
+
+What's left at the top is the image loader's per-word `kfar_write`
+sequence and a disk-buffer miss, at about 1,900 instructions. At the
+4800 baud `eclipse-run.sh` uses for the console (about 2 ms per
+character, roughly 1 us per S/140 instruction), that keeps a continuous
+burst of input from overrunning TTI's one-character buffer. At 9600
+baud it is borderline for back-to-back characters (a paste) during heavy
+kernel work, and still fine for typing.
+
+`examples/pmm.c` gained an optional `PMM_POLL` hook (the kernel passes
+`-DPMM_POLL=tty_poll`); without it nothing changes.
+
+**Cost**, exact instruction counts (`set clock nocalibrate`, then SIMH
+`show clock`) for the same workload: 9,679,612 with every poll call site
+present but `tty_poll` returning at once, 9,920,352 polling: +2.5%.
+Measurement caveat: the kernel's "ticks" statistic is *not* an
+instruction count. SIMH's idle detection advances simulated time while
+the CPU sits in the idle loop, so ticks also depend on when scripted
+input happens to arrive (405 vs 212 ticks for these two builds with
+near-identical instruction counts).

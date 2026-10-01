@@ -39,7 +39,7 @@ build_kernel() {
 # boot stack: main() only runs until k_start(); the kernel is ~30KW, so the
 # default 4096-word margin would pass 32KW (reorder_asm.py LOGICAL_TOP).
 # Pass 1 uses 1536; pass 2 uses main's static worst case + 64.
-ECLIPSE_STACK_WORDS=${bootstk:-1536} ECLIPSE_CC_KEEP_ASM="$out/kernel.s" "$cc" --ieee -o "$out/kernel.simh" ${KCFLAGS:-} "$@" \
+ECLIPSE_STACK_WORDS=${bootstk:-1536} ECLIPSE_CC_KEEP_ASM="$out/kernel.s" "$cc" --ieee -o "$out/kernel.simh" -DPMM_POLL=tty_poll ${KCFLAGS:-} "$@" \
   "$here/kmain.c" "$here/proc.c" "$here/kmem.c" "$here/kio.c" \
   "$here/fs.c" "$here/fsys.c" "$here/tty.c" "$here/tapeinst.c" "${bdev_src[@]}" \
   "$here/../examples/pmm.c" "$here/../examples/console.c" \

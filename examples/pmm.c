@@ -1,4 +1,13 @@
 #include "pmm.h"
+/* PMM_POLL: optional hook called every 16 entries of a scan, so a kernel
+ * can service a pending keystroke during a long first-fit search
+ * (KERNEL_NOTES.md section 11). Unset: no change. */
+#ifdef PMM_POLL
+void PMM_POLL(void);
+#define PMM_SCAN_POLL(i) do { if (((i) & 15) == 0) PMM_POLL(); } while (0)
+#else
+#define PMM_SCAN_POLL(i) do { } while (0)
+#endif
 
 /* One byte per allocatable frame -- deliberately NOT a packed 16-bit
  * bitmap. See PMM_NOTES.md's "Design" section for the full reasoning:
@@ -17,6 +26,7 @@ static unsigned int freemap[PMM_NUM_FRAMES];  /* int, not char: see PMM_NOTES.md
 void pmm_init(void) {
     int i;
     for (i = 0; i < PMM_NUM_FRAMES; i++) {
+        PMM_SCAN_POLL(i);
         freemap[i] = 1;
     }
 }
@@ -24,6 +34,7 @@ void pmm_init(void) {
 int pmm_alloc_page(void) {
     int i;
     for (i = 0; i < PMM_NUM_FRAMES; i++) {
+        PMM_SCAN_POLL(i);
         if (freemap[i]) {
             freemap[i] = 0;
             return PMM_FIRST_FRAME + i;
@@ -48,6 +59,7 @@ int pmm_frames_free(void) {
     int i;
     int count = 0;
     for (i = 0; i < PMM_NUM_FRAMES; i++) {
+        PMM_SCAN_POLL(i);
         if (freemap[i]) count++;
     }
     return count;
