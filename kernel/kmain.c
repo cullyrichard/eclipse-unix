@@ -4,6 +4,7 @@
 #include "kio.h"
 #include "fs.h"
 #include "bdev.h"
+#include "tapeinst.h"
 #include "../examples/pmm.h"
 
 int main(void) {
@@ -16,8 +17,8 @@ int main(void) {
         kputs("kernel: PANIC disk not ready\r\n");
         return 1;
     }
-    if (fs_init() < 0) {
-        kputs("kernel: PANIC no filesystem on DSK unit 0\r\n");
+    if (fs_init() < 0 && (tape_install() < 0 || fs_init() < 0)) {
+        kputs("kernel: PANIC no filesystem on the disk\r\n");
         return 1;
     }
     kputs("kernel: disk ");

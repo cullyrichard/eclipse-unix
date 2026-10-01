@@ -290,7 +290,7 @@ int main(void) {
         int r;
         for (r = 0; r < ROWS_PER_BATCH; r++) {
             unsigned int md_addr = half_base + 1 + (unsigned int)r * (IMG_WIDTH * 2);
-            host_dma_in((unsigned int)row_buf, IMG_WIDTH * 2, md_addr);
+            host_dma_in((unsigned int)row_buf, IMG_WIDTH * 2, md_addr, 0);
 
             int x;
             for (x = 0; x < IMG_WIDTH; x++) {

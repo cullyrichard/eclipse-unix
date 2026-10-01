@@ -47,6 +47,8 @@ def main():
     p.add_argument("input_tap", help="a SIMH .tap tape image built by this toolchain")
     p.add_argument("-o", dest="out", help="output .ab path (default: input.tap -> input.ab)")
     p.add_argument("--dgasm", default="dgasm", help="dgasm executable (default: dgasm on PATH)")
+    p.add_argument("--first-file", action="store_true",
+                   help="unpack the program in the first tape file and ignore later files")
     p.add_argument("--no-verify", action="store_true",
                     help="skip reassembling boot_stage2.s.in to confirm the recovered "
                          "entry address (default: verify)")
@@ -55,15 +57,26 @@ def main():
     out = args.out or os.path.splitext(args.input_tap)[0] + ".ab"
 
     try:
-        records = [r for r in mktape.parse_tap(args.input_tap) if r is not None]
-        if len(records) != 2:
+        # File 1 (up to the first tape mark) is the boot record plus the
+        # program, which since KERNEL_NOTES.md section 12 may span several
+        # records (one read caps at 16384 words). Later files (e.g. an
+        # install tape's filesystem image) are not part of the program.
+        files, _eot, _rest = mktape.split_tape_files(mktape.parse_tap(args.input_tap))
+        if not files:
+            raise ValueError(f"{args.input_tap}: no data records")
+        if len(files) > 1 and not args.first_file:
             raise ValueError(
-                f"{args.input_tap}: found {len(records)} data record(s), expected exactly 2 "
-                f"(boot record + program record) -- this toolchain's tapes never have more; "
-                f"a tape with extra records (e.g. multiple files, a label record) can't be "
-                f"unpacked without silently dropping data"
+                f"{args.input_tap}: {len(files)} tape files; only the first is a "
+                f"program -- pass --first-file to unpack it and ignore the rest"
             )
-        record1, record2 = records[0], records[1]
+        records = files[0][0] if isinstance(files[0], tuple) else files[0]
+        if len(records) < 2:
+            raise ValueError(
+                f"{args.input_tap}: first file has {len(records)} record(s), expected "
+                f"a boot record followed by program record(s)"
+            )
+        record1 = records[0]
+        record2 = b"".join(records[1:])
         if len(record1) != 512:
             raise ValueError(
                 f"{args.input_tap}: record 1 is {len(record1)} bytes, expected 512 "

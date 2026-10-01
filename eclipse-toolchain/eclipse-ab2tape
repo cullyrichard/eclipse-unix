@@ -73,7 +73,7 @@ def main():
         print(f"eclipse-ab2tape: {e}", file=sys.stderr)
         sys.exit(1)
 
-    print(f"wrote {out}: record1={r1}B (boot), record2={r2}B (program) + tapemark")
+    print(f"wrote {out}: record1={r1}B (boot), program={r2}B in 4096-word records + tapemark")
     print("boot in eclipseemu with:")
     print(f"  att mta0 {out}")
     print("  boot mta0")

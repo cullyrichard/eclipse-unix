@@ -1,3 +1,4 @@
 __pycache__/
 kernel/out/
 trace.log
+examples/out-realhw/

@@ -102,7 +102,7 @@ int main(void) {
     psa0 = read_psa();
     printf("CHK: batch 0 halted, psa0=%o\n", psa0);
 
-    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, MD_HALF_0 + 1);
+    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, MD_HALF_0 + 1, 0);
     report_row("BEFORE (batch 0, half0)");
 
     fpu_out(cmd_wtfn, fn_start);
@@ -115,7 +115,7 @@ int main(void) {
     psa2 = read_psa();
     printf("CHK: batch 2 halted, psa2=%o\n", psa2);
 
-    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, MD_HALF_0 + 1);
+    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, MD_HALF_0 + 1, 0);
     report_row("AFTER (batch 2, half0)");
 
     printf("psa0=%o psa1=%o psa2=%o (all equal -> resume never advances PSA)\n",

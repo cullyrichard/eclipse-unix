@@ -45,7 +45,7 @@ int main(void) {
     }
     printf("CHK9: AP halted (batch 0 complete)\n");
 
-    host_dma_in((unsigned int)buf, 20, MD_HALF_0 + 1);
+    host_dma_in((unsigned int)buf, 20, MD_HALF_0 + 1, 0);
     printf("CHK10: DMA read-back complete\n");
 
     printf("Row 0, columns 0-19 (expect small integers, 0..32):\n");

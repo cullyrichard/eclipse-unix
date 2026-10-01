@@ -55,7 +55,7 @@ int main(void) {
     }
     printf("CHK9: AP halted (batch 0 complete)\n");
 
-    host_dma_in((unsigned int)buf, 80, MD_HALF_0 + 1);
+    host_dma_in((unsigned int)buf, 80, MD_HALF_0 + 1, 0);
     printf("CHK10: DMA read-back complete (80 words = 40 pixels @ 2 words each)\n");
 
     printf("Row 0, pixels 0-39, as (hi,lo) word pairs and decoded float:\n");

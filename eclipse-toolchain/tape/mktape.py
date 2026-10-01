@@ -65,7 +65,8 @@ def parse_addr(s):
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STAGE2_TEMPLATE = os.path.join(SCRIPT_DIR, "boot_stage2.s.in")
-MTA_MAX_RECORD_WORDS = 32768  # nova_mta.c: MTA_MAXFR = 1<<16 bytes
+MTA_MAX_RECORD_WORDS = 32768  # whole program limit: logical address space
+PROGRAM_RECORD_WORDS = 4096   # per tape record (< nova_mta.c WC_SIZE 16384)
 
 
 def write_tap(path, records):
@@ -319,10 +320,15 @@ def build_tape(entry_addr, program_words, out_path, dgasm_cmd="dgasm"):
             f"{MTA_MAX_RECORD_WORDS}-word single-record limit (see "
             f"boot_stage2.s.in's 'Known limit' comment)"
         )
-    record2 = big_endian_bytes(program_words)
+    # The program as records of at most PROGRAM_RECORD_WORDS, then a tape
+    # mark: boot_stage2.s.in reads records until the mark. One read caps
+    # at 16384 words (nova_mta.c WC_SIZE), so a single record silently
+    # truncated anything bigger (KERNEL_NOTES.md section 12).
+    recs = [big_endian_bytes(program_words[i:i + PROGRAM_RECORD_WORDS])
+            for i in range(0, len(program_words), PROGRAM_RECORD_WORDS)]
 
-    write_tap(out_path, [record1, record2, None])
-    return len(record1), len(record2)
+    write_tap(out_path, [record1] + recs + [None])
+    return len(record1), sum(len(r) for r in recs)
 
 
 def _main():
@@ -339,7 +345,7 @@ def _main():
 
     program_words = le_words_from_file(args.program_bin)
     r1, r2 = build_tape(args.entry, program_words, args.out, args.dgasm)
-    print(f"wrote {args.out}: record1={r1}B (boot), record2={r2}B (program) + tapemark")
+    print(f"wrote {args.out}: record1={r1}B (boot), program={r2}B in {PROGRAM_RECORD_WORDS}-word records + tapemark")
 
 
 if __name__ == "__main__":

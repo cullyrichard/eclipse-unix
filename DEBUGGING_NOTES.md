@@ -4317,3 +4317,32 @@ now prints `f=114`, `E=5 Ej=2` (was `f=10`, `E=4`, `Ej=0`). c-testsuite
 is 206/220 in both float modes, per-test set unchanged. The `static`
 workarounds in the shell and utilities are left in place: they are
 harmless, and they keep those frames small.
+
+### 42. Tape boot silently truncated any program over 16KW (fixed)
+
+`eclipse-toolchain/tape/mktape.py` wrote the whole program as one tape
+record and assumed a read could take 32768 words (SIMH's `MTA_MAXFR` is
+65536 bytes). But the controller's word count caps one read at 16384
+words (`nova_mta.c` `WC_SIZE = 1 << 14`). Reproduced with a
+23961-word program: after `boot mta0`, `STA2 = 0201` (word-count overflow
+`0200`) and `MA = 040050` = 050 + 16384. The program halted without
+printing, because `printf` was in the part that never loaded. It was
+invisible until the kernel (about 29KW) became the first program that
+big.
+
+**Fix**: `boot_stage2.s.in` reads records in a loop until a tape mark
+(the DMA address advances across records; the loop still lives below
+050, which the program overwrites). `mktape.py` writes the program as
+4096-word records. `eclipse-tape2ab` now takes the whole first tape
+file, and refuses tapes with more files unless `--first-file` is
+given. The same program now boots and verifies all 17000 data words; a
+tape → `.ab` → tape round trip is byte-identical.
+
+### 43. Large global array, runtime index: `ELDA 1,big-15769` (OPEN)
+
+Found while building #42's test: a 17000-element `const unsigned int`
+array indexed by a loop counter (`big[i]`) produced an absolute operand
+of the form `big - 15769`. dgasm rejects it ("Address out of range. Got
+-13766"). This looks like loop strength reduction folding a constant
+offset into the global's address, which goes negative for a large array.
+The test was rewritten to walk a pointer instead. Not yet investigated.

@@ -60,7 +60,7 @@ int main(void) {
     }
     printf("CHK9: AP halted (batch 0 complete)\n");
 
-    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, MD_HALF_0 + 1);
+    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, MD_HALF_0 + 1, 0);
     printf("CHK10: DMA read-back complete (%d words = %d pixels)\n",
            IMG_WIDTH * 2, IMG_WIDTH);
 

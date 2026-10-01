@@ -41,7 +41,7 @@ build_kernel() {
 # Pass 1 uses 1536; pass 2 uses main's static worst case + 64.
 ECLIPSE_STACK_WORDS=${bootstk:-1536} ECLIPSE_CC_KEEP_ASM="$out/kernel.s" "$cc" --ieee -o "$out/kernel.simh" ${KCFLAGS:-} "$@" \
   "$here/kmain.c" "$here/proc.c" "$here/kmem.c" "$here/kio.c" \
-  "$here/fs.c" "$here/fsys.c" "$here/tty.c" "${bdev_src[@]}" \
+  "$here/fs.c" "$here/fsys.c" "$here/tty.c" "$here/tapeinst.c" "${bdev_src[@]}" \
   "$here/../examples/pmm.c" "$here/../examples/console.c" \
   "$here/kentry.s"
 
@@ -69,4 +69,11 @@ if [ "${KEEPDISK:-0}" = 1 ] && [ -f "$out/disk.img" ]; then
 else
   python3 "$here/fstools/mkfs.py" "$out/disk.img" "${mkfs_args[@]}" "${files[@]}" ${EXTRA:-}
 fi
+
+# Real-hardware media (FS_NOTES.md section 7): the kernel as a DG absolute
+# binary (serial load via eclipse-run.sh's APL path), as a boot tape, and
+# an install tape that also carries the filesystem for tapeinst.c.
+dgasm -t eclipse_s140 -f ab -o "$out/kernel.ab" "$out/kernel.s"
+python3 "$here/../eclipse-toolchain/eclipse-ab2tape" -o "$out/kernel.tap" "$out/kernel.ab" >/dev/null
+python3 "$here/fstools/mkinstalltape.py" "$out/kernel.ab" "$out/disk.img" "$out/install.tap"
 

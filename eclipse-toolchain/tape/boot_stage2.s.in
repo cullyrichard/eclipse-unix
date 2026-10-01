@@ -59,14 +59,14 @@
 // directly into memory by the time the done flag comes true. Once done,
 // jump to the entry address.
 //
-// Known limit: one NIOS pulse reads exactly one physical tape record in
-// full (nova_mta.c's CU_READ, capped at MTA_MAXFR = 65536 bytes = 32768
-// words); mktape.py puts the entire compiled program in that single
-// second record, so a program whose image exceeds that is out of scope
-// for this design (same spirit as the project's existing hard limits --
-// e.g. the 256-word shared page-zero budget documented in
-// SOFT_FLOAT_NOTES.md -- rather than something this file tries to work
-// around with multi-record chaining).
+// Multi-record (KERNEL_NOTES.md section 12): the program follows record 1
+// as a series of records, ended by a tape mark; this loop reads them all.
+// The earlier single-record version assumed one read could take 32768
+// words (MTA_MAXFR = 65536 bytes), but the controller's word count caps a
+// read at 16384 words (nova_mta.c WC_SIZE = 1<<14): a bigger program was
+// silently truncated (status word-count overflow, MA stopped at
+// entry+16384). Found when the kernel (about 29KW) became the first
+// program that large.
 
 	org 1
 	dev MTA = 022
@@ -77,27 +77,30 @@ zero:
 	dw 0
 
 stage2:
-	LDA 0, zero			// AC0 = 0
-	DOC 0, MTA			// mta_wc = 0 -> next read allows up to the
-					// controller's own max record size, not
-					// whatever record 1's 256-word read left
-					// behind
 	LDA 0, loadaddr			// AC0 = entry address
-	DOB 0, MTA			// mta_ma = entry address -- record 2
-					// lands exactly where it's meant to run
-	NIOS MTA			// start pulse: read record 2 (async)
+	DOB 0, MTA			// mta_ma = entry address; the DMA
+					// advances it word by word, so each
+					// following record lands right after
+					// the previous one
+next:
+	LDA 0, zero			// AC0 = 0
+	DOC 0, MTA			// word count 0 = the controller's
+					// maximum (16384 words, nova_mta.c
+					// WC_SIZE) -- records are smaller
+	NIOS MTA			// start pulse: read the next record
 poll:
 	SKPDN MTA
 	JMP poll
-	JMP @loadaddr			// the program's entry point -- indirect
-					// through the same page-zero word used
-					// above, not a direct zero-page jump:
-					// @ENTRY@ can be anywhere in the full
-					// 16-bit address space (eclipse-ab2tape
-					// packages arbitrary .ab files, whose
-					// entry need not be in page zero),
-					// while a direct JMP's displacement is
-					// limited to 0-255
+	DIA 0, MTA			// status 1
+	LDA 1, eofbit
+	AND 1, 0, SZR			// skip unless this read hit the tape
+	JMP @loadaddr			// mark: program complete -- jump to
+					// its entry (indirect: @ENTRY@ may be
+					// anywhere in 16-bit space)
+	JMP next			// another program record
+
+eofbit:
+	dw 0400				// STA_EOF in DIA's status-1 word
 
 	org 0377
 	JMP stage2, 0			// word offset 255 of tape record 1:

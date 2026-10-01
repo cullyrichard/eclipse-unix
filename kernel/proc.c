@@ -808,13 +808,20 @@ void k_trap(int cause) {
  * testing easy): a deterministic-clock profile then showed two thirds of
  * all CPU time in the context switch (load), KERNEL_NOTES.md section 11. */
 unsigned int k_pitinit = 0200000 - 160;
-unsigned int k_pimask = 0001;    /* PI_TTO only: TTI, DSK and PIT interrupt
-                                    (TTO output stays polled, IO_NOTES.md) */
+/* MSKO word: 1 = masked. Only the devices the kernel serves may
+ * interrupt -- PIT (01000), TTI (02) and the disk backend's device if it is
+ * interrupt-driven. Everything else is masked: a device the kernel never
+ * touches could still hold Done from before boot (the tape bootstrap's last
+ * read left MTA's Done set, and its interrupt panicked the first tape-booted
+ * kernel, FS_NOTES.md section 7). nova_defs.h PI_* bits. */
+unsigned int k_pimask = 0177777 & ~(01000u | 02u);
 
 void k_start(void) {
     unsigned int i;
     for (i = 0; i < (NPROC + 1) * KSTK; i++) kstk[i] = KSTK_FILL;
-    k_pimask |= bdev_pimask;    /* a polled disk backend masks its own */
+    if (bdev_devcode)           /* interrupt-driven disk backend (DSK) */
+        k_pimask &= ~0100u;
+    asm volatile("NIOC 022");   /* MTA: drop Done left by the tape boot */
     tty_start();
     asm volatile(
         "ELEF 0,k_stkflt,0\n\t"

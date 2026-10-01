@@ -81,7 +81,7 @@ int main(void) {
     half_base = (target_batch & 1) ? MD_HALF_1 : MD_HALF_0;
     md_addr = half_base + 1 + (unsigned int)row_in_batch * (IMG_WIDTH * 2);
 
-    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, md_addr);
+    host_dma_in((unsigned int)buf, IMG_WIDTH * 2, md_addr, 0);
     printf("CHK: DMA read-back complete for row %d\n", TARGET_ROW);
 
     minv = bits_to_float(buf[0], buf[1]);

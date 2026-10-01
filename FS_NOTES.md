@@ -289,3 +289,56 @@ executed. SIMH models none of those controllers, so they need your
 drives. To build one: `KDISK=vulcan kernel/build.sh` (or `zebra`,
 `kismet`; for Kismet add `KCFLAGS=-DKISMET_HEADS=KISMET_HEADS_6161` or
 `_6214` for the larger models).
+
+## 7. Real-hardware media: boot tape, install tape, absolute binary
+
+`kernel/build.sh` now also writes, next to `kernel.simh`:
+
+| file | what | how to use it |
+|---|---|---|
+| `kernel.ab` | the kernel as a DG absolute binary (`dgasm -f ab`) | serial load via the APL path in `eclipse-run.sh`; SIMH `load kernel.ab` + `run 50` |
+| `kernel.tap` | bootable magtape: bootstrap record + kernel | `boot mta0` (SIMH), or the front panel's magtape program load |
+| `install.tap` | `kernel.tap` + the filesystem as a second tape file | boot it with a disk that has no filesystem |
+
+**Installing a filesystem on a real disk.** If the kernel finds no valid
+superblock, `kernel/tapeinst.c` asks on the console:
+
+```
+kernel: no filesystem on the disk. Install one from tape unit 0? [y/N] y
+kernel: skipped 9 boot records; copying filesystem..
+kernel: installed 112 blocks
+```
+
+Only "y" proceeds. It rewinds tape unit 0, skips file 1 (the bootstrap
+and kernel), copies each 512-byte record of file 2 to the next disk
+block, then mounts. A disk with a valid filesystem is never touched.
+`fstools/mkinstalltape.py` writes every metadata block (even all-zero
+ones, so a fresh disk's garbage can't become inodes) and every nonzero
+block after them; trailing free blocks are left out, since `balloc`
+zeroes a block when it allocates it.
+
+**Verified in SIMH:**
+- `kernel.tap` boots and runs a shell session against an existing disk.
+- `install.tap` onto a missing disk image: installed 112 blocks, booted,
+  created `/etc/note` from the shell; host `fsck` clean and the file
+  extracts.
+- Answering "n" halts with the disk unchanged (md5 identical).
+- `KDISK=dkp`: `install.tap` onto a blank DG 4231 installed 183 blocks,
+  booted, and ran commands; `fsck` clean.
+- `kernel.ab` loaded with SIMH's `load` runs a session.
+
+**Two real bugs found on the way:**
+1. **Tape boot silently truncated programs over 16KW**
+   (DEBUGGING_NOTES.md #42). Fixed; tapes are now multi-record.
+2. **A tape-booted kernel panicked** on the "unexpected interrupt" left
+   by the bootstrap's final tape read (MTA Done). The kernel now masks
+   every device it doesn't serve (`k_pimask` = all except PIT, TTI and
+   an interrupt-driven disk) and clears MTA at startup.
+
+**FPS programs rebuilt**: `examples/build-realhw.sh` rebuilds all 13
+real-hardware programs (the `mandel240_*` diagnostics and viewer, and
+the FPS DMA and arithmetic tests) as `.ab` files with `--ieee` (#34). Seven of
+them had stopped compiling when `fps.h` gained an explicit `fmt_flag`
+(commit `93fe9d7`); their 8 calls now pass `0`, which is exactly the
+old behavior, since the flag is ORed into the control words. None of
+these can run in SIMH (no FPS model), so they are only build-verified.
