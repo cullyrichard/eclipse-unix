@@ -30,8 +30,8 @@ and `bigmem` verifies its 96KW with `errs=0`.
   040 = `_STACKTOP` and does `EJSR main`, and the calling convention
   reads the first argument at FP-5 (= `_STACKTOP`) and the second at FP-6.
   This was checked against a compiled 2-argument function, not assumed.
-  `_STACKTOP-1` is safe to write: `reorder_asm.py` leaves a 4096-word gap
-  below `_STACKTOP`, and the stack mapping now starts at the page holding
+  `_STACKTOP-1` is safe to write: `reorder_asm.py` puts `_STACKTOP` at
+  least 2 words past the image (DEBUGGING_NOTES.md #47), and the stack mapping now starts at the page holding
   `_STACKTOP-1`. Plain `spawn(path)` gives `argv = {path}`.
 - **main() may return.** `_start` executes `HALT` after `EJSR main`,
   which I/O-faults under protection. The fault handler recognizes exactly
@@ -311,3 +311,43 @@ blocking and waking both ends dozens of times, and came out identical.
     found an undo bug (`u` saved its own undo point first, so it undid
     nothing); fixed. Building `ed` also turned up a compiler bug
     (DEBUGGING_NOTES.md #45).
+- **`basic`**: line-numbered BASIC, `basic` (interactive, `READY`
+  prompt) or `basic file` (load, run, exit with 1 on an error).
+  - Commands: `RUN LIST [n] NEW LOAD "f" SAVE "f" BYE`.
+  - Statements: `LET PRINT (; , TAB) INPUT ["prompt";] IF..THEN
+    GOTO GOSUB RETURN FOR..TO..STEP NEXT ON..GOTO DIM READ DATA RESTORE
+    REM END STOP RANDOMIZE`, with `:` to separate statements.
+  - Expressions: `^ * / + -`, relations (numeric and string),
+    `NOT AND OR`.
+  - Functions: `ABS INT SGN SQR SIN COS TAN ATN EXP LOG RND LEN ASC VAL
+    CHR$ STR$ LEFT$ RIGHT$ MID$`.
+  - Variables: `A`-`Z` plus `A0`-`Z9` numerics (IEEE single), `A$`-`Z$`
+    strings up to 80 characters, and numeric arrays of 1 or 2
+    dimensions (DIM, or 0-10 by default).
+  - Errors print `?<WHAT> ERROR`.
+  - Limits: program text 5000 bytes and 250 lines; 500 array cells in
+    total. The program runs from its text and isn't tokenized.
+  - Size: even at -O0 with tiny buffers the code didn't fit in 32KW.
+    It's built with `-Oz` (BASIC is the only program that is; see
+    DEBUGGING_NOTES.md #47 for what -O needed). Code plus runtime is
+    about 26K words, of which the soft-float runtime is about 8K.
+  - Stack: 2560 words. Expressions recurse, and a stack overflow wraps
+    into page zero and hangs the machine without a fault, so `nexpr` and
+    `sexpr` compare a local's address with `main`'s. Past 1800 words in
+    use they report `?FORMULA TOO COMPLEX`. String temporaries live in
+    non-inlined helpers (`strfn`, `strrel`) so they don't add to every
+    nesting level: one level of parentheses went from about 400 words to
+    about 150.
+  - Tested by `edtest.py tests/basic_session.txt` (`> ` lines go at
+    `READY`, `? ` lines answer INPUT). The session covers arithmetic and
+    formatting, every function, string comparison, a prime sieve,
+    2-D arrays, STEP -3, GOSUB, READ/DATA/RESTORE, ON GOTO, INPUT,
+    errors, SAVE then NEW then LOAD, the saved file read with `cat`, and
+    `basic file` exit status 0. Everything matched by hand. The test
+    found two bugs, both fixed: a value printed after an error inside
+    PRINT (`?DIVISION BY ZERO ERROR` then ` 0 `), and `PRINT "A"<"B"`
+    printed as a string item. `tests/basic_deep.txt` nests
+    `LEN(STR$(...))`, `LEFT$(...)`, `SIN(...)` and parentheses 8 to 20
+    deep: every case either gives the answer or `?FORMULA TOO COMPLEX`,
+    and the process exits normally. With the guard disabled, the same
+    file hangs the machine.

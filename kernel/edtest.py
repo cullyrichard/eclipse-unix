@@ -4,6 +4,8 @@
 expect/send. Lines in the script: '$ cmd' = shell command, ': cmd' = ed
 command (sent at the "ed* " prompt -- a string the kernel never prints;
 SIMH keeps every expect rule armed, so ": " fired on "kernel: boot"),
+'> cmd' = BASIC line sent at "READY", '? text' = answer to a BASIC
+INPUT prompt ("? "),
 '| text' = a line of ed input text (sent together with the
 following lines up to the next non-'|' line, which is typically '.').
 usage: edtest.py script [OUT dir]   -- console output on stdout"""
@@ -16,8 +18,9 @@ def esc(t): return t.replace('\\', '\\\\').replace('"', '\\"')
 i = 0
 while i < len(lines):
     l = lines[i]
-    if l.startswith('$ ') or l.startswith(': '):
-        prompt = '$ ' if l.startswith('$ ') else 'ed* '
+    prompts = {'$ ': '$ ', ': ': 'ed* ', '> ': 'READY', '? ': '? '}
+    if l[:2] in prompts:
+        prompt = prompts[l[:2]]
         text = esc(l[2:]) + '\\r'
         i += 1
         while i < len(lines) and lines[i].startswith('| '):

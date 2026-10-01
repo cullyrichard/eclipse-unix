@@ -17,7 +17,8 @@ DIRSIZ, DENTSZ = 14, 16
 MAXFILE = 65535
 T_FREE, T_FILE, T_DIR = 0, 1, 2
 I_TYPE, I_NLINK, I_SIZE, I_ADDR, I_INDIR = 0, 1, 2, 4, 12
-AOUT_MAGIC = 0o407
+AOUT_MAGIC = 0o407     # header: magic, nwords, base, stacktop
+AOUT_MAGIC2 = 0o410    # ... + stack words (reorder_asm.py _STACKWDS)
 
 
 class Image:
@@ -171,8 +172,16 @@ def simh_to_aout(path):
     if lda & 0o177400 != 0o020000:
         raise ValueError(f'{path}: word at 050 is {lda:o}, not LDA 0,<pz>')
     stacktop = mem[lda & 0o377]
-    if stacktop <= end:
-        raise ValueError(f'{path}: _STACKTOP {stacktop:o} <= end {end:o}')
+    if stacktop <= end + 1:     # _STACKTOP-1 holds main's argv
+        raise ValueError(f'{path}: _STACKTOP {stacktop:o} <= end+1 {end + 1:o}')
     words = [mem.get(a, 0) for a in range(base, end + 1)]
+    # _start: LDA 0,_STACKTOP / STA 0,040 / LDA 0,_STACKLIM; _STACKWDS
+    # follows _STACKLIM (0177700). Older builds have no _STACKWDS.
+    lim = mem.get(0o52, 0)
+    if lim & 0o177400 == 0o020000 and mem.get(lim & 0o377) == 0o177700:
+        swords = mem.get((lim & 0o377) + 1, 0)
+        if 0 < swords and stacktop + swords <= 0o100000:
+            return struct.pack(f'>5H{len(words)}H', AOUT_MAGIC2, len(words),
+                               base, stacktop, swords, *words)
     return struct.pack(f'>4H{len(words)}H', AOUT_MAGIC, len(words), base,
                        stacktop, *words)

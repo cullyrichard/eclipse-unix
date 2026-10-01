@@ -436,7 +436,11 @@ def relax_long_jumps(text: str) -> str:
 # addresses from the *final* line layout — it must see the post-dedup
 # file, not count the soon-to-be-removed duplicate lines).
 
-CPI_DECL_RE = re.compile(r"^\s*var\s+(CPI\d+_\d+)\s*=\s*(.+?)\s*$")
+# The value stops before any `//` comment: llc tags each function's
+# first constant-pool line with "// -- Begin function <name>", and
+# matching that comment as part of the value kept every function's
+# first constant (very often 0 or 1) from ever merging.
+CPI_DECL_RE = re.compile(r"^\s*var\s+(CPI\d+_\d+)\s*=\s*(.+?)\s*(?://.*)?$")
 IDENT_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -542,30 +546,62 @@ def dedup_constants(text: str) -> str:
 # case of a program whose own data nearly fills the address space outright.
 
 LOGICAL_TOP = 0o100000  # 32768: one past the highest logical word address
-STACK_MARGIN = 4096  # words of headroom between the program's own highest
-                      # data address and _STACKTOP — see this section's
-                      # comment for why this is generous.
+STACK_MARGIN = 4096  # default stack size in words, checked ABOVE
+                      # _STACKTOP (ECLIPSE_STACK_WORDS overrides it).
+STACK_FLOOR = 0o400  # lowest legal _STACKTOP; see fix_stack_pointer
+STACK_GAP = 2  # _STACKTOP = end of program + this. Only _STACKTOP-1
+               # (main's argv slot under kernel/, proc.c args_place) must
+               # be free; compute_addresses is exact (fslib.py and
+               # eclipse-cc both re-check against dgasm's real output).
 STACK_LIMIT = 0o177700  # must match EclipseAsmPrinter.cpp's _STACKLIM
                          # default exactly — the real ceiling the
                          # upward-growing hardware stack checks against,
                          # not just dgasm's raw address-space limit.
 
 SP_DECL_RE = re.compile(r"^(\s*var\s+_STACKTOP\s*=\s*)(\S+)(.*)$")
+LIM_DECL_RE = re.compile(r"^\s*var\s+_STACKLIM\s*=")
+
+
+def add_stack_words(text: str) -> str:
+    """Insert `var _STACKWDS = <stack words>` right after `_STACKLIM`, in
+    page zero. Runs before relax_long_jumps so every address computed
+    after it already includes the extra word. kernel/fstools/fslib.py
+    finds it as the word after _STACKLIM (via _start's LDA 0,_STACKLIM)."""
+    margin = int(os.environ.get("ECLIPSE_STACK_WORDS", STACK_MARGIN))
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if LIM_DECL_RE.match(line):
+            lines.insert(i + 1, f"var _STACKWDS = {margin}")
+            break
+    else:
+        raise SystemExit("reorder_asm.py: no `var _STACKLIM = ...` line")
+    return "\n".join(lines) + "\n"
 
 
 def fix_stack_pointer(text: str) -> str:
     lines = text.splitlines()
     _label_addr, _line_addr, end_addr = compute_addresses(lines)
 
+    # The stack grows UP from _STACKTOP, so the room it needs is above
+    # _STACKTOP, not below it. Until 2026-10-01 this added the margin
+    # BELOW (new_sp = end + margin), a leftover from the old downward
+    # software stack: every program wasted `margin` words of address space
+    # and the check never covered the stack itself (DEBUGGING_NOTES.md
+    # #47). _STACKWDS (inserted after _STACKLIM) records the size so
+    # kernel/fstools/fslib.py can tell the kernel how much stack to map.
     margin = int(os.environ.get("ECLIPSE_STACK_WORDS", STACK_MARGIN))
-    new_sp = end_addr + margin
+    # Never in page zero: RTN raises a stack underflow fault (through
+    # 043) when the stack pointer it leaves is below 0400 -- SIMH
+    # NOVA/eclipse_cpu.c RTN, `t < 0400`. Seen as every --ieee c-testsuite
+    # program under ~200 words returning to 0 (DEBUGGING_NOTES.md #47).
+    new_sp = max(end_addr + STACK_GAP, STACK_FLOOR)
     # The stack must also fit under the 32KW LOGICAL ceiling: addresses
     # are 15 bits, so a _STACKTOP past 077777 wraps to low memory and the
     # stack grows over the program's own code. STACK_LIMIT (_STACKLIM,
     # 0177700) is a 16-bit value and never caught that -- found when the
     # merged kernel (30218 words + 4096) got _STACKTOP 0103012 and its
     # boot stack overwrote code at 03410 (KERNEL_NOTES.md merge section).
-    if new_sp > LOGICAL_TOP:
+    if new_sp + margin > LOGICAL_TOP:
         print(
             f"reorder_asm.py: program ends at {end_addr} ({end_addr:#o}); "
             f"a {margin}-word stack above it would pass the 32KW logical "
@@ -611,12 +647,12 @@ def main() -> int:
     if len(sys.argv) == 3:
         with open(sys.argv[1], "r") as f:
             text = f.read()
-        result = fix_stack_pointer(relax_long_jumps(dedup_constants(reorder(sanitize_identifiers(text)))))
+        result = fix_stack_pointer(relax_long_jumps(add_stack_words(dedup_constants(reorder(sanitize_identifiers(text))))))
         with open(sys.argv[2], "w") as f:
             f.write(result)
     elif len(sys.argv) == 1:
         text = sys.stdin.read()
-        sys.stdout.write(fix_stack_pointer(relax_long_jumps(dedup_constants(reorder(sanitize_identifiers(text))))))
+        sys.stdout.write(fix_stack_pointer(relax_long_jumps(add_stack_words(dedup_constants(reorder(sanitize_identifiers(text)))))))
     else:
         print("usage: reorder_asm.py [in.s out.s]", file=sys.stderr)
         return 2

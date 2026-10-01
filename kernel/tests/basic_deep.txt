@@ -1,0 +1,9 @@
+$ basic
+> PRINT LEN(STR$(LEN(STR$(LEN(STR$(1))))))
+> PRINT LEN(STR$(LEN(STR$(LEN(STR$(LEN(STR$(LEN(STR$(LEN(STR$(LEN(STR$(LEN(STR$(1))))))))))))))))
+> PRINT LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$(LEFT$("ABC",3),3),3),3),3),3),3),3),3),3),3),3)
+> PRINT SIN(SIN(SIN(SIN(SIN(SIN(SIN(SIN(SIN(SIN(SIN(SIN(1))))))))))))
+> PRINT ((((((((((((((((((((1))))))))))))))))))))
+> PRINT "STILL ALIVE"
+> BYE
+$ exit 0

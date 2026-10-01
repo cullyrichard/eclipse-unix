@@ -6,6 +6,8 @@
 #                   file.c|file.s [...]
 #
 # -D/-I (joined form only) are passed straight to clang -cc1.
+# -O0/-O1/-O2/-Os/-Oz: optimization level for clang -cc1 and llc (default
+# -O0, the level everything was verified at; see DEBUGGING_NOTES.md #47).
 #
 # A `.s` source is hand-written Eclipse assembly: it is not compiled, but
 # appended verbatim onto llc's output before reorder_asm.py runs -- the
@@ -80,12 +82,14 @@ ieee=0
 sources=()
 asm_sources=()
 cpp_flags=()
+optflag=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     --hwfloat) hwfloat=1; shift ;;
     --ieee) ieee=1; shift ;;
     -D?*|-I?*) cpp_flags+=("$1"); shift ;;
+    -O0|-O1|-O2|-Os|-Oz) cpp_flags+=("$1"); optflag="$1"; shift ;;
     *.s) asm_sources+=("$1"); shift ;;
     *) sources+=("$1"); shift ;;
   esac
@@ -140,6 +144,8 @@ ll_files=()
 
 compile_one() {
   local src="$1" base ll
+  shift
+  local flags=("$@")
   base="$(basename "${src%.*}")"
   ll="$work/${base}.ll"
   # -nostdsysteminc: without it, -cc1 (bypassing the normal driver, which is
@@ -157,15 +163,25 @@ compile_one() {
     -isystem "$RESOURCE_DIR/include" \
     -I "$SCRIPT_DIR/rt/include" -I "$SCRIPT_DIR/rt" \
     ${cc1_float_flags[@]+"${cc1_float_flags[@]}"} \
-    ${cpp_flags[@]+"${cpp_flags[@]}"} \
+    ${flags[@]+"${flags[@]}"} \
     -emit-llvm "$src" -o "$ll"
   ll_files+=("$ll")
 }
 
 for src in "${sources[@]}"; do
-  compile_one "$src"
+  compile_one "$src" ${cpp_flags[@]+"${cpp_flags[@]}"}
 done
-compile_one "$RT_SRC"
+# The runtime always compiles at -O0, whatever -O the program asked for:
+# clang -cc1 -O0 marks every rt function optnone, so llc keeps its -O0
+# selection path for them even at llc -O2. eclipse_rt.c's soft-float
+# code is written around the -O0 lowering (split helpers, statics) and
+# at -O2 hits a DAG combine that turns a select of constant shifts into
+# a variable-count shift this backend can't select (__divsf3).
+rt_flags=()
+for f in ${cpp_flags[@]+"${cpp_flags[@]}"}; do
+  case "$f" in -O*) ;; *) rt_flags+=("$f") ;; esac
+done
+compile_one "$RT_SRC" ${rt_flags[@]+"${rt_flags[@]}"}
 
 merged="$work/merged.ll"
 "$LLVM_LINK" -S "${ll_files[@]}" -o "$merged"
@@ -217,7 +233,12 @@ build_and_assemble() {
     "$merged" -o "$stripped"
 
   local asm="$work/out.s"
-  "$LLC" -mtriple="$TRIPLE" "${llc_float_flags[@]}" -filetype=asm "$stripped" -o "$asm"
+  local llcopt=()
+  case "$optflag" in
+    -O1) llcopt=(-O1) ;;
+    -O2|-Os|-Oz) llcopt=(-O2) ;;
+  esac
+  "$LLC" -mtriple="$TRIPLE" "${llc_float_flags[@]}" ${llcopt[@]+"${llcopt[@]}"} -filetype=asm "$stripped" -o "$asm"
 
   # Append the hand-written __addsf3_hw/__subsf3_hw assembly (see
   # rt/eclipse_hwfloat.s's own header comment) onto llc's own output
@@ -289,7 +310,7 @@ while :; do
   missing="$(echo "$output" | grep -oE 'Undefined symbol: [A-Za-z_][A-Za-z0-9_]*' \
              | sed 's/Undefined symbol: //' | sort -u)" || true
   new="$(comm -23 <(echo "$missing") <(echo "$protected" | tr ',' '\n' | sort -u))" || true
-  if [ -z "$new" ] || [ "$pass" -ge 15 ]; then
+  if [ -z "$new" ] || [ "$pass" -ge 40 ]; then
     echo "eclipse-cc: dgasm failed:" >&2
     echo "$output" >&2
     exit 1

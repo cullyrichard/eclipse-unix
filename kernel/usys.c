@@ -6,14 +6,16 @@
  * named global, never an "r" operand, and AC2/AC3 (the live frame
  * pointer and the caller's AC3) are saved/restored around SYC because
  * staging arg2 in AC2 clobbers the frame pointer. See examples/ulib.c's
- * comments for the full reasoning. */
-static int __sys_reason;
-static int __sys_arg1;
-static int __sys_arg2;
-static int __sys_arg3;
-static int __sys_ret;
-static unsigned int __sys_save2;
-static unsigned int __sys_save3;
+ * comments for the full reasoning. volatile + used: at -O the optimizer
+ * sees no C reader of these (the asm names them only as text), so it
+ * would drop the stores and then the globals themselves. */
+static volatile int __sys_reason __attribute__((used));
+static volatile int __sys_arg1 __attribute__((used));
+static volatile int __sys_arg2 __attribute__((used));
+static volatile int __sys_arg3 __attribute__((used));
+static volatile int __sys_ret __attribute__((used));
+static volatile unsigned int __sys_save2 __attribute__((used));
+static volatile unsigned int __sys_save3 __attribute__((used));
 
 /* arg3 travels in AC3 (FS_NOTES.md); AC3 is saved/restored anyway. */
 static int __syscall3(int reason, int arg1, int arg2, int arg3) {
@@ -34,6 +36,7 @@ static int __syscall3(int reason, int arg1, int arg2, int arg3) {
         "ESTA 0,__sys_ret,0\n\t"
         "ELDA 2,__sys_save2,0\n\t"
         "ELDA 3,__sys_save3,0\n\t"
+        ::: "memory"
     );
     return __sys_ret;
 }

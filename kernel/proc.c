@@ -113,8 +113,8 @@ static int proc_alloc(unsigned int nwords, unsigned int base,
     pt0 = (unsigned int)n * NPAGES;
     lastimg = (base + nwords - 1) >> 10;
     /* stacktop-1 too: main's second argument (argv) lives there
-     * (SHELL_NOTES.md), and reorder_asm.py leaves a 4096-word gap below
-     * _STACKTOP, so that word is never program data */
+     * (SHELL_NOTES.md), and reorder_asm.py puts _STACKTOP 2 words past
+     * the image (STACK_GAP), so that word is never program data */
     sfirst = (stacktop - 1) >> 10;
     slast = (stacktop + stackwords - 1) >> 10;
     if (slast > NPAGES - 1) slast = NPAGES - 1;
@@ -173,8 +173,11 @@ int proc_create(const unsigned int *words, unsigned int nwords,
 }
 
 /* Executable file format (FS_NOTES.md; kernel/fstools/mkfs.py writes it):
- *   word 0 AOUT_MAGIC, 1 nwords, 2 base, 3 stacktop, then nwords words. */
+ *   word 0 AOUT_MAGIC, 1 nwords, 2 base, 3 stacktop, then nwords words;
+ *   AOUT_MAGIC2 adds word 4, the stack words the program was built for
+ *   (eclipse-cc ECLIPSE_STACK_WORDS, recorded as _STACKWDS). */
 #define AOUT_MAGIC 0407
+#define AOUT_MAGIC2 0410
 static unsigned int lbuf[256];
 
 /* Arguments for the next proc_spawn: kargc strings packed NUL-terminated in
@@ -224,9 +227,10 @@ static void wlog(unsigned int pt0, unsigned int a, unsigned int v) {
  * main's frame pointer is _STACKTOP+5 and it reads its first argument at
  * FP-5 = _STACKTOP, its second at FP-6 = _STACKTOP-1 (the backend's
  * convention, checked on a compiled 2-argument function). */
-static void args_place(unsigned int pt0, unsigned int stacktop) {
+static void args_place(unsigned int pt0, unsigned int stacktop,
+                       unsigned int stackwords) {
     unsigned int slast, top, strw, sw, av, i, v;
-    slast = (stacktop + STACKWORDS - 1) >> 10;
+    slast = (stacktop + stackwords - 1) >> 10;
     if (slast > NPAGES - 1) slast = NPAGES - 1;
     top = ((slast + 1) << 10) - 1;              /* last mapped word */
     strw = (kargn + 1) >> 1;
@@ -244,21 +248,24 @@ static void args_place(unsigned int pt0, unsigned int stacktop) {
 }
 
 int proc_spawn(const char *path, int parent) {
-    unsigned int inum, hdr[4], off, i, k, a, pfn, pt0;
+    unsigned int inum, hdr[5], off, hsz, sw, i, k, a, pfn, pt0;
     int n, got;
     inum = fs_namei(path);
     if (inum == 0) return -1;
-    if (fs_readi(inum, 0, (char *)hdr, 8) != 8 || hdr[0] != AOUT_MAGIC)
-        return -1;
+    if (fs_readi(inum, 0, (char *)hdr, 10) != 10) return -1;
+    if (hdr[0] == AOUT_MAGIC) { hsz = 8; sw = STACKWORDS; }
+    else if (hdr[0] == AOUT_MAGIC2) { hsz = 10; sw = hdr[4]; }
+    else return -1;
     if (hdr[1] == 0 || hdr[2] + hdr[1] < hdr[2] || hdr[2] + hdr[1] > 0100000)
         return -1;
-    n = proc_alloc(hdr[1], hdr[2], hdr[3], STACKWORDS);
+    if (sw < STACKWORDS) sw = STACKWORDS;   /* the old minimum still holds */
+    n = proc_alloc(hdr[1], hdr[2], hdr[3], sw);
     if (n < 0) return -1;
     pt0 = (unsigned int)n * NPAGES;
     /* the image's words, big-endian bytes on disk = exactly the byte
      * order of a word array viewed through a char pointer */
     for (i = 0; i < hdr[1]; i += 256) {
-        off = 8 + 2 * i;
+        off = hsz + 2 * i;
         got = fs_readi(inum, off, (char *)lbuf, 512);
         if (got < 2) break;
         for (k = 0; k < (unsigned int)got / 2 && i + k < hdr[1]; k++) {
@@ -267,7 +274,7 @@ int proc_spawn(const char *path, int parent) {
             kfar_write(pfn, a & 01777, lbuf[k]);
         }
     }
-    args_place(pt0, hdr[3]);
+    args_place(pt0, hdr[3], sw);
     if (parent >= 0) fsys_inherit(n, parent);
     p_parent[n] = parent;
     p_state[n] = P_RUN;

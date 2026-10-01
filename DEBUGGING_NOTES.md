@@ -4408,3 +4408,102 @@ DAG combine instead. Fix (llvm-project): also register
 `setOperationAction(ISD::BRCOND, MVT::Other, Custom)`. The repro now
 compiles and returns `4 1 1` for three inputs exercising both `&&`
 arms. c-testsuite 206/220 in both modes, same set.
+
+### 46. Two gaps found building BASIC: `ffloor` and rotate-by-constant-pool (fixed / worked around)
+
+Found compiling `kernel/user/basic.c`.
+
+- **`floorf`/`fabsf` have no soft-float libcall.** clang turns them into
+  the `llvm.floor`/`llvm.fabs` intrinsics, and the backend has no
+  `FFLOOR` lowering or runtime routine, so llc stops at instruction
+  selection. Worked around in `basic.c` with its own `bfloor`/`babs`
+  (truncate through `long`, then adjust); a real `floorf` in the runtime
+  is still open.
+- **"variable shift" on a constant shift.** A rotate expanded from
+  `x % 14 == 0` reached `LowerShift` with its amount as
+  `WRAPPER(TargetConstantPool <i16 n>)`, a constant hidden in the
+  constant pool, so the backend took it for a variable count and gave up.
+  Fix (llvm-project, `EclipseISelLowering.cpp` `LowerShift`): look
+  through a WRAPPER of a non-machine constant-pool `ConstantInt` and use
+  the plain constant. Checked with a test over 0..100 and negatives of
+  `% 14` and `% 7`: 408 hits, sum 392, both match the host.
+
+c-testsuite 206/220 in both float modes, same set.
+
+### 47. Optimization levels (-O1/-Os/-Oz) and the stack layout (fixed)
+
+BASIC is 40975 words at -O0, over the 32KW limit, so `eclipse-cc` now
+passes `-O0|-O1|-O2|-Os|-Oz` on (clang `-cc1 -O<n>`, llc `-O2`, or `-O1`
+for -O1). Each level ran into a different problem:
+
+1. **-Os miscompile, c-testsuite 00216** (`sea_fill1/2: wrong`). The
+   datalayout didn't mention i64, so i64 got LLVM's default 8-byte
+   alignment. At -Os, `struct { int i,j,k,l; } c = { .j = 5 }` became one
+   `store i64` into an `alloca align 8`. The DAG then turned the
+   `base + 2` address into `base | 2`, which is only correct if the base
+   really is 8-byte aligned. The Eclipse stack is word aligned, and the
+   backend can't realign it. Fix (llvm-project): datalayout
+   `...-i32:16-i64:16-f32:16-f64:16-n16-S16` (in both
+   `EclipseTargetMachine.cpp` and clang `Targets/Eclipse.h`), and
+   `StackRealignable=false` in `EclipseFrameLowering` so an over-aligned
+   object is clamped to the real 2-byte stack alignment. A minimal repro
+   printed `1: 0 0 0 0` before the fix and `0 5 0 0` after.
+2. **The runtime at -O2 hits the same variable-shift wall** (`__divsf3`:
+   a DAG combine turns a select of two constant shifts into one shift by
+   a selected amount). `eclipse_rt.c`'s soft float is written around the
+   -O0 lowering, so `eclipse-cc` now always compiles the runtime with no
+   -O flag. clang then marks its functions `optnone`, and llc keeps the
+   -O0 path for them even at llc -O2.
+3. **`usys.c` syscalls broke at -O.** The asm in `__syscall3` names its
+   globals only as text, so the optimizer deleted the "dead" stores and
+   then the globals (`Undefined symbol: __sys_save2`). The globals are now
+   `volatile` and `__attribute__((used))`, and the asm has a `"memory"`
+   clobber.
+4. **Constant dedup missed every function's first constant.**
+   `reorder_asm.py`'s `CPI_DECL_RE` included the trailing
+   `// -- Begin function` comment in the value, so `CPI3_0 = 0 // ...`
+   never matched `0`. Page zero ran out (`Address out of range. Got 296`).
+   The regex now stops at `//`, which took BASIC from 243 to 153
+   constant words.
+5. **The retry loop stopped too early.** dgasm reports one undefined
+   symbol per pass, and BASIC needs 16 runtime symbols. The cap went from
+   15 to 40 passes.
+6. **-O1: llc "ran out of registers" in `parsenum`.** Not fixed; -O1
+   isn't used.
+
+**The stack was being reserved below `_STACKTOP`.** `fix_stack_pointer`
+set `_STACKTOP = end + ECLIPSE_STACK_WORDS`, a leftover from the old
+downward-growing software stack. The hardware stack grows up from
+`_STACKTOP`, so every program wasted that many words (4096 by default)
+below it, and the 32KW check never covered the stack itself. Under
+kernel/, a process got only `STACKWORDS` (1024) mapped above `_STACKTOP`
+whatever it was built for. Now:
+
+- `_STACKTOP = max(end + 2, 0400)`, and `end + 2 + stack` must be at or
+  below 32KW. `_STACKTOP-1` is main's argv slot.
+- The 0400 floor exists because RTN raises a stack underflow fault
+  (through 043) whenever the stack pointer it leaves is below 0400
+  (SIMH `NOVA/eclipse_cpu.c`, RTN: `if (t < 0100000 && t < 0400)`). I
+  haven't checked this against a hardware manual page yet. The first
+  run without the floor caught it: every `--ieee` c-testsuite program
+  small enough to put the stack in page zero returned to 0 (145
+  TIMEOUTs). Default-mode programs passed because they always carry the
+  hwfloat routines, which keep them above 0400.
+- `reorder_asm.py` inserts `var _STACKWDS = <stack words>` after
+  `_STACKLIM`. `fstools/fslib.py` reads it (the word after `_STACKLIM`,
+  found through `_start`'s `LDA 0,_STACKLIM`) and writes a 5-word a.out
+  header, magic 0410, with the stack size as word 4. `proc_spawn` maps
+  `max(that, STACKWORDS)` words of stack and still accepts 0407 images.
+- `kernel/build.sh` builds user programs with `ECLIPSE_STACK_WORDS=1024`,
+  the same amount the kernel mapped before, and BASIC with 2560 at -Oz.
+
+**Stack overflow is not caught.** The stack pages run up to 32KW, and the
+next push wraps to logical 0 (page zero, which is mapped). With BASIC's
+expression guard turned off (`-DSTACKUSE=60000`), 8 nested
+`LEN(STR$(...))` hung the machine with no fault reported. That is why
+BASIC checks its own stack depth (SHELL_NOTES.md section 6).
+
+Verification, on the final toolchain: c-testsuite 206/220, the same set,
+at --ieee, default and --ieee -Oz. --ieee -Os was also 206, but that run
+came before the stack-layout change. The kernel shell session and both
+BASIC sessions pass.

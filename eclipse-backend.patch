@@ -204,7 +204,7 @@ index 000000000..3c7f03129
 +}
 diff --git a/clang/lib/Basic/Targets/Eclipse.h b/clang/lib/Basic/Targets/Eclipse.h
 new file mode 100644
-index 000000000..0307994e6
+index 000000000..410daa702
 --- /dev/null
 +++ b/clang/lib/Basic/Targets/Eclipse.h
 @@ -0,0 +1,135 @@
@@ -298,7 +298,7 @@ index 000000000..0307994e6
 +    SigAtomicType = SignedInt;
 +
 +    // Must match EclipseTargetMachine.cpp's computeDataLayout() exactly.
-+    resetDataLayout("E-p:16:16-i16:16-i32:16-f32:16-f64:16-n16");
++    resetDataLayout("E-p:16:16-i16:16-i32:16-i64:16-f32:16-f64:16-n16-S16");
 +  }
 +
 +  void getTargetDefines(const LangOptions &Opts,
@@ -1528,10 +1528,10 @@ index 000000000..4d27c2c2c
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSEASMPRINTER_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseFrameLowering.cpp b/llvm/lib/Target/Eclipse/EclipseFrameLowering.cpp
 new file mode 100644
-index 000000000..8d9f53ac1
+index 000000000..6d51aa8a8
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseFrameLowering.cpp
-@@ -0,0 +1,211 @@
+@@ -0,0 +1,212 @@
 +//===-- EclipseFrameLowering.cpp - Eclipse Frame Information -------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -1572,7 +1572,8 @@ index 000000000..8d9f53ac1
 +// Moving locals to the positive side removes the collision entirely
 +// instead of just relocating it.
 +EclipseFrameLowering::EclipseFrameLowering(const EclipseSubtarget & /*STI*/)
-+    : TargetFrameLowering(TargetFrameLowering::StackGrowsUp, Align(2), 2) {}
++    : TargetFrameLowering(TargetFrameLowering::StackGrowsUp, Align(2), 2,
++                          Align(2), /*StackRealignable=*/false) {}
 +// LocalAreaOffset = 2 (bytes = 1 word), not 0: offset 0 itself is also
 +// reserved - it's SAVE's own return-address slot (mem[FP], the word
 +// RTN reads to jump back to the caller). With LocalAreaOffset=0, PEI's
@@ -1939,10 +1940,10 @@ index 000000000..4f78fbe16
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
 new file mode 100644
-index 000000000..a7c44bae6
+index 000000000..94dda753c
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
-@@ -0,0 +1,1832 @@
+@@ -0,0 +1,1853 @@
 +//===-- EclipseISelLowering.cpp - Eclipse DAG Lowering Implementation ---===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -2642,6 +2643,27 @@ index 000000000..a7c44bae6
 +SDValue EclipseTargetLowering::LowerShift(SDValue Op, SelectionDAG &DAG) const {
 +  SDLoc dl(Op);
 +  SDValue X = Op.getOperand(0);
++  // The amount may have been legalized into a constant-pool load already
++  // (WRAPPER(TargetConstantPool)) by the time a shift built by another
++  // expansion reaches here -- e.g. ROTR from DAGCombiner's divisibility
++  // test for `x % 14 == 0`, expanded into SHL/SRL after its constant
++  // amount was legalized (DEBUGGING_NOTES.md #46). Look through it.
++  SDValue AmtOp = Op.getOperand(1);
++  uint64_t WrappedAmt = 0;
++  bool HaveWrapped = false;
++  if (AmtOp.getOpcode() == EclipseISD::WRAPPER &&
++      AmtOp.getOperand(0).getOpcode() == ISD::TargetConstantPool) {
++    auto *CP = cast<ConstantPoolSDNode>(AmtOp.getOperand(0));
++    if (!CP->isMachineConstantPoolEntry())
++      if (auto *CI = dyn_cast<ConstantInt>(CP->getConstVal())) {
++        WrappedAmt = CI->getZExtValue();
++        HaveWrapped = true;
++      }
++  }
++  if (HaveWrapped)
++    return DAG.getNode(Op.getOpcode(), SDLoc(Op), Op.getValueType(),
++                       Op.getOperand(0),
++                       DAG.getConstant(WrappedAmt, SDLoc(Op), MVT::i16));
 +  auto *AmtNode = dyn_cast<ConstantSDNode>(Op.getOperand(1));
 +  if (!AmtNode)
 +    report_fatal_error(
@@ -6214,7 +6236,7 @@ index 000000000..081e5ffe4
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSESUBTARGET_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseTargetMachine.cpp b/llvm/lib/Target/Eclipse/EclipseTargetMachine.cpp
 new file mode 100644
-index 000000000..ea2bc5d2c
+index 000000000..8a498052b
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseTargetMachine.cpp
 @@ -0,0 +1,99 @@
@@ -6269,7 +6291,7 @@ index 000000000..ea2bc5d2c
 +  // seen by MachineFrameInfo etc. are still real bytes; this backend's own
 +  // frame-offset code (EclipseFrameLowering.cpp) converts those to
 +  // 16-bit-word counts itself where it matters.
-+  return "E-p:16:16-i16:16-i32:16-f32:16-f64:16-n16";
++  return "E-p:16:16-i16:16-i32:16-i64:16-f32:16-f64:16-n16-S16";
 +}
 +
 +static Reloc::Model getEffectiveRelocModel(std::optional<Reloc::Model> RM) {

@@ -28,10 +28,17 @@ case "$kdisk" in
 esac
 echo "$kdisk" > "$out/kdisk"
 
-progs="init sh tar ed echo cat ls mkdir rm wc cp pwd fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
+progs="init sh tar ed basic echo cat ls mkdir rm wc cp pwd fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
 files=()
+# Per-program stack (words above _STACKTOP; the kernel maps at least
+# STACKWORDS=1024 of it, more if the image's header asks) and -O level.
+# basic needs -Oz to fit under 32KW at all (SHELL_NOTES.md section 6).
 for p in $progs; do
-  ECLIPSE_CC_KEEP_ASM="$out/$p.s" "$cc" --ieee ${UCFLAGS:-} -o "$out/$p.simh" \
+  pstk=1024; popt=
+  case "$p" in
+    basic) pstk=2560; popt=-Oz ;;
+  esac
+  ECLIPSE_STACK_WORDS=$pstk ECLIPSE_CC_KEEP_ASM="$out/$p.s" "$cc" --ieee $popt ${UCFLAGS:-} -o "$out/$p.simh" \
     "$here/user/$p.c" "$here/usys.c" >/dev/null
   files+=("$out/$p.simh:/bin/$p")
 done
