@@ -9,9 +9,8 @@
  * of buffer pointers at once; anything that can call bread() again (e.g.
  * balloc) may evict them, so such code re-reads afterwards. */
 #include "fs.h"
-#include "../examples/dsk.h"
 #include "tty.h"
-#include "kdsk.h"
+#include "bdev.h"
 
 #define NBUF 8
 
@@ -43,7 +42,7 @@ static unsigned int *bread(unsigned int blk) {
         if (!bvalid[i]) { v = i; break; }
         if (bage[i] < oldest) { oldest = bage[i]; v = i; }
     }
-    kdsk_read(blk, &bdata[v * BWORDS]);
+    bdev_read(blk, &bdata[v * BWORDS]);
     bblk[v] = blk;
     bvalid[v] = 1;
     bage[v] = ++bclock;
@@ -51,7 +50,7 @@ static unsigned int *bread(unsigned int blk) {
 }
 
 static void bwrite(unsigned int blk, unsigned int *b) {
-    kdsk_write(blk, b);
+    bdev_write(blk, b);
 }
 
 int fs_init(void) {
@@ -65,7 +64,7 @@ int fs_init(void) {
     s_bmap = sb[SB_BMAP];
     s_istart = sb[SB_ISTART];
     s_dstart = sb[SB_DSTART];
-    if (s_nblocks == 0 || s_nblocks > DSK_MAX_BLOCK + 1 || s_dstart >= s_nblocks)
+    if (s_nblocks == 0 || s_nblocks > bdev_nblocks() || s_dstart >= s_nblocks)
         return -1;
     return 0;
 }
@@ -77,6 +76,11 @@ static unsigned int balloc(void) {
     for (blk = s_dstart; blk < s_nblocks; blk++) {
         if ((blk & 3) == 0) tty_poll();
         b = bread(s_bmap + (blk >> 12));
+        if ((blk & 15) == 0 && b[(blk >> 4) & 0377] == 0177777 &&
+            blk + 15 < s_nblocks) {
+            blk += 15;                  /* whole word in use: skip it */
+            continue;
+        }
         if ((b[(blk >> 4) & 0377] & bitmask[blk & 15]) == 0) {
             b[(blk >> 4) & 0377] |= bitmask[blk & 15];
             bwrite(s_bmap + (blk >> 12), b);
@@ -102,6 +106,12 @@ unsigned int fs_freeblocks(void) {
     for (blk = s_dstart; blk < s_nblocks; blk++) {
         if ((blk & 3) == 0) tty_poll();
         b = bread(s_bmap + (blk >> 12));
+        if ((blk & 15) == 0 && blk + 15 < s_nblocks &&
+            (b[(blk >> 4) & 0377] == 0 || b[(blk >> 4) & 0377] == 0177777)) {
+            if (b[(blk >> 4) & 0377] == 0) n += 16;
+            blk += 15;                  /* whole word free / in use */
+            continue;
+        }
         if ((b[(blk >> 4) & 0377] & bitmask[blk & 15]) == 0) n++;
     }
     return n;

@@ -38,7 +38,9 @@ int main(void) {
     /* guards the "free blocks restored" check below against passing
      * vacuously when freeblocks() itself fails (-1 == -1): found when a
      * dispatch refactor dropped SYS_FREEBLK (SHELL_NOTES.md) */
-    check("freeblocks() sane", free0 > 0 && free0 < 1024);
+    /* -1 (0177777) means the call failed; a real count is always lower,
+     * since the metadata blocks are never free (any disk size, KDISK) */
+    check("freeblocks() sane", free0 > 0 && free0 < 0177777);
 
     check("open missing -> -1", open("/nope", O_RDONLY) == -1);
     check("mkdir /ft", mkdir("/ft") == 0);

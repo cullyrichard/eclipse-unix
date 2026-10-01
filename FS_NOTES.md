@@ -230,3 +230,62 @@ didn't regress the >32KW path.
   `fs.c` calls `dsk_read_block`/`dsk_write_block` directly. Moving it onto
   `blockdev_t` is the step that lets this filesystem run on your real
   drives.
+
+## 6. Block-device layer and real-drive backends (`kernel/bdev.h`)
+
+`fs.c` now talks only to `bdev_read`/`bdev_write`. One backend is linked
+per kernel, chosen with `KDISK` at build time (`kernel/build.sh`):
+
+| KDISK | backend | device | how | verified |
+|---|---|---|---|---|
+| `dsk` (default) | `bdev_dsk.c` | DG 4019 fixed-head, 020 | interrupt-driven, caller sleeps | SIMH |
+| `dkp` | `bdev_dkp.c` | DG 4231 (3330-class, about 92 MB) on the DKP controller, 033 | polled; seek, then CHS transfer | SIMH (`set dkp0 4231`) |
+| `zebra` | `bdev_dskp.c` + `examples/zebra.c` | DG 6060/6061/6067, 027 | polled | builds only |
+| `vulcan` | `bdev_dskp.c` + `examples/vulcan.c` | DG 6122, 027 | polled | builds only |
+| `kismet` | `bdev_dskp.c` + `examples/kismet.c` | DG 6160/6161/6214, 027 | polled | builds only |
+
+- **Why the 4231, not the D31.** The first DKP backend targeted the 4047
+  (Diablo 31) because STORAGE_NOTES.md had probed it. But a 2.4 MB pack is
+  Nova-era: by the S/140's years (1979-82) a system would have had a
+  3330-class drive or a DG/Disc subsystem. The 4231 is the largest drive
+  SIMH's DKP models, and it uses the controller's new register format
+  (9-bit cylinder, 5-bit surface and sector).
+- **32 MB partition.** Block numbers are 16 bits, so a filesystem holds
+  at most 65535 blocks. On every big-disk backend it occupies the first
+  65535 blocks; the rest of the drive is unused for now. Going past that
+  means 32-bit block numbers, which would depend on the backend's `long`
+  arithmetic (DEBUGGING_NOTES.md #12 still lists an open 32-bit multiply
+  bug).
+- **Polled backends** mask their own completion interrupt
+  (`bdev_pimask`) and call `tty_poll()` in their wait loops. Unlike DSK,
+  they hold the CPU during the transfer.
+- **Stacks sized per backend.** The DG/Disc drivers are deeper:
+  `build.sh` now builds twice, sizing the kernel stacks (worst + 48,
+  rounded up to 64) and the boot stack (main's worst + 64) from
+  `stackdepth.py`. Zebra and Vulcan are built with `DSKP_BLOCK16`, a new
+  16-bit-only translation path, so the 32-bit runtime divide (and its
+  118-word frame) isn't linked into the kernel.
+
+```
+KDISK   kernel stacks  static worst  boot stack  image (words)
+dsk     768            658           576         28357
+dkp     832            735           640         29089
+zebra   896            811           704         30274
+vulcan  832            769           640         29469
+kismet  832            755           640         29306
+```
+
+**Verified on `KDISK=dkp`**: a 65535-block filesystem with 1024 inodes
+(16 bitmap blocks, data from block 82). Two boots of autotest:
+`fstest` 40/40, writers' files match the host pattern, `fsck` clean,
+65308 blocks free both times. The full shell session ran with every
+feature and error case behaving as expected. `fstest`'s
+"freeblocks() sane" check used to assume a 1024-block disk; it now only
+rejects -1. `balloc` and `freeblocks` skip whole bitmap words, since
+65535 bits is a lot of per-bit work. DSK re-verified unchanged.
+
+**Not verified**: the Zebra, Vulcan and Kismet kernels have never
+executed. SIMH models none of those controllers, so they need your
+drives. To build one: `KDISK=vulcan kernel/build.sh` (or `zebra`,
+`kismet`; for Kismet add `KCFLAGS=-DKISMET_HEADS=KISMET_HEADS_6161` or
+`_6214` for the larger models).

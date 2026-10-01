@@ -40,7 +40,7 @@ def main():
     ap.add_argument('-i', type=int, default=128)
     ap.add_argument('files', nargs='*')
     a = ap.parse_args()
-    assert a.i % IPB == 0 and a.n <= 1024
+    assert a.i % IPB == 0 and a.n <= 65535   # 16-bit block numbers
     bmap_blocks = (a.n + 4095) // 4096
     istart = 2 + bmap_blocks
     dstart = istart + a.i // IPB

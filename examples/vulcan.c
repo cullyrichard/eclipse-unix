@@ -63,6 +63,20 @@ static int vulcan_rw(unsigned int unit, unsigned long blockno,
     unsigned int doa_word, doc1_word, doc2_word, dob_word;
     unsigned int dia_status, dib_status;
 
+#ifdef DSKP_BLOCK16
+    /* 16-bit-only addressing: see zebra.c's DSKP_BLOCK16 comment. */
+    {
+        unsigned int b16, cs16;
+        if (unit > 3u || blockno > 0177777UL)
+            return -1;
+        b16 = (unsigned int)blockno;
+        sector = b16 % DSKP_SECTORS_PER_SURF;
+        cs16 = b16 / DSKP_SECTORS_PER_SURF;
+        surface = cs16 % DSKP_SURFACES_PER_CYL;
+        cyl = cs16 / DSKP_SURFACES_PER_CYL;
+        (void)cyl_and_surf;
+    }
+#else
     if (unit > 3u || blockno >= DSKP_SECTORS_PER_DRIVE)
         return -1;
 
@@ -73,6 +87,7 @@ static int vulcan_rw(unsigned int unit, unsigned long blockno,
     cyl_and_surf = blockno / DSKP_SECTORS_PER_SURF;
     surface = (unsigned int)(cyl_and_surf % DSKP_SURFACES_PER_CYL);
     cyl = (unsigned int)(cyl_and_surf / DSKP_SURFACES_PER_CYL);
+#endif
 
     /* --- Phase I: select a drive and specify a seek command
      * (pgmref.pdf p.11). Single-processor simplification per the

@@ -8,7 +8,7 @@
 #include "fsys.h"
 #include "ksync.h"
 #include "tty.h"
-#include "kdsk.h"
+#include "bdev.h"
 
 /* ---- context exchange with kernel/kentry.s ------------------------------
  * kentry.s's entry paths write the interrupted user context here, and
@@ -471,9 +471,9 @@ static void shutdown(void) {
     kputs("/");
     kputu(tty_npoll);
     kputs(" dsk_intr=");
-    kputu(dsk_nintr);
+    kputu(bdev_nintr);
     kputs(" dsk_sleeps=");
-    kputu(dsk_nsleep);
+    kputu(bdev_nsleep);
     kputs("\r\nkernel: kernel stack high water (words of ");
     kputu(KSTK);
     kputs("):");
@@ -750,7 +750,7 @@ void k_trap(int cause) {
         }
         if (cause == K_DEV) {
             if (k_devcode == 010) tty_intr();
-            else if (k_devcode == 020) kdsk_intr();
+            else if (bdev_devcode && k_devcode == bdev_devcode) bdev_intr();
             else {
                 kputs("\r\nkernel: PANIC unexpected interrupt, device ");
                 kputo(k_devcode);
@@ -814,6 +814,7 @@ unsigned int k_pimask = 0001;    /* PI_TTO only: TTI, DSK and PIT interrupt
 void k_start(void) {
     unsigned int i;
     for (i = 0; i < (NPROC + 1) * KSTK; i++) kstk[i] = KSTK_FILL;
+    k_pimask |= bdev_pimask;    /* a polled disk backend masks its own */
     tty_start();
     asm volatile(
         "ELEF 0,k_stkflt,0\n\t"

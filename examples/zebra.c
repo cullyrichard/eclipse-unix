@@ -188,6 +188,23 @@ static int zebra_rw(unsigned int unit, unsigned long blockno,
     unsigned int dia_status, dib_status;
     int rc;
 
+#ifdef DSKP_BLOCK16
+    /* 16-bit-only addressing (the kernel's filesystem uses 16-bit block
+     * numbers, KERNEL_NOTES.md section 12): native 16-bit division, so no
+     * 32-bit runtime divide (__udivsi3 -> u32_divmod) is linked -- that
+     * chain set the kernel's worst-case stack depth. */
+    {
+        unsigned int b16, t16;
+        if (unit > 3u || blockno > 0177777UL)
+            return -1;
+        b16 = (unsigned int)blockno;
+        sector = b16 % ZEBRA_SECTORS_PER_TRACK;
+        t16 = b16 / ZEBRA_SECTORS_PER_TRACK;
+        surface = t16 % ZEBRA_SURFACES_PER_UNIT;
+        cylinder = t16 / ZEBRA_SURFACES_PER_UNIT;
+        (void)tmp;
+    }
+#else
     if (unit > 3u || blockno >= ZEBRA_SECTORS_PER_DRIVE)
         return -1;
 
@@ -197,6 +214,7 @@ static int zebra_rw(unsigned int unit, unsigned long blockno,
     tmp = blockno / ZEBRA_SECTORS_PER_TRACK;
     surface = (unsigned int)(tmp % ZEBRA_SURFACES_PER_UNIT);
     cylinder = (unsigned int)(tmp / ZEBRA_SURFACES_PER_UNIT);
+#endif
 
     rc = zebra_seek(unit, cylinder);
     if (rc != 0)

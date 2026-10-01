@@ -1,4 +1,5 @@
-/* kdsk.c -- interrupt-driven DSK transfers (IO_NOTES.md).
+/* bdev_dsk.c -- block-device backend: interrupt-driven DSK transfers
+ * (IO_NOTES.md; interface in bdev.h).
  *
  * Inside a process's syscall, a transfer is started (DOA block, DOB word
  * address, NIOS = read / NIOP = write -- the same programming sequence as
@@ -12,16 +13,22 @@
  * until the interrupt: fs.c only calls this with the filesystem lock
  * held (kernel/proc.c), so no other process can pick that buffer-cache
  * slot while the DMA is outstanding. */
-#include "kdsk.h"
+#include "bdev.h"
 #include "ksync.h"
 #include "../examples/dsk.h"
 
 static unsigned int dsk_busy, dsk_done, dsk_status;
-unsigned int dsk_nintr, dsk_nsleep;          /* statistics */
+unsigned int bdev_nintr, bdev_nsleep;        /* statistics */
+unsigned int bdev_pimask = 0;                /* DSK interrupts are used */
+unsigned int bdev_devcode = 020;
 
-void kdsk_intr(void) {
+int bdev_init(void) { return 0; }
+unsigned int bdev_nblocks(void) { return DSK_MAX_BLOCK + 1; }
+const char *bdev_name(void) { return "dsk (DG 4019)"; }
+
+void bdev_intr(void) {
     unsigned int st;
-    dsk_nintr++;
+    bdev_nintr++;
     asm volatile("DIA %0,020" : "=r"(st));
     asm volatile("NIOC 020");                /* clear Done: drops the request */
     if (dsk_busy) {
@@ -46,7 +53,7 @@ static int kdsk_io(unsigned int blk, unsigned int *buf, int wr) {
     if (wr) asm volatile("NIOP 020");
     else asm volatile("NIOS 020");
     while (!dsk_done) {
-        dsk_nsleep++;
+        bdev_nsleep++;
         ksleep(CHAN_DSK);
     }
     dsk_busy = 0;
@@ -54,5 +61,5 @@ static int kdsk_io(unsigned int blk, unsigned int *buf, int wr) {
     return (int)dsk_status;
 }
 
-int kdsk_read(unsigned int blk, unsigned int *buf)  { return kdsk_io(blk, buf, 0); }
-int kdsk_write(unsigned int blk, unsigned int *buf) { return kdsk_io(blk, buf, 1); }
+int bdev_read(unsigned int blk, unsigned int *buf)  { return kdsk_io(blk, buf, 0); }
+int bdev_write(unsigned int blk, unsigned int *buf) { return kdsk_io(blk, buf, 1); }

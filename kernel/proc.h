@@ -21,9 +21,13 @@
                                saved kernel context (IO_NOTES.md) */
 #define P_EMBRYO   5        /* slot reserved, address space being built */
 
-#define KSTK       768      /* words of kernel stack per process (+ idle);
-                               build.sh checks the static worst case
-                               (stackdepth.py) fits under KSTK-16-margin */
+#ifndef KSTK
+#define KSTK       768      /* words of kernel stack per process (+ idle).
+                               build.sh sizes it from the static worst case
+                               (stackdepth.py): worst + 48, rounded up to
+                               64, passed as -DKSTK (the disk backend
+                               changes the depth) */
+#endif
 
 #define STACKWORDS 1024     /* stack mapped above a program's _STACKTOP */
 

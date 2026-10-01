@@ -3,6 +3,7 @@
 #include "proc.h"
 #include "kio.h"
 #include "fs.h"
+#include "bdev.h"
 #include "../examples/pmm.h"
 
 int main(void) {
@@ -11,10 +12,17 @@ int main(void) {
     kputs("kernel: boot, free_frames=");
     kputu((unsigned int)pmm_frames_free());
     kputs("\r\n");
+    if (bdev_init() < 0) {
+        kputs("kernel: PANIC disk not ready\r\n");
+        return 1;
+    }
     if (fs_init() < 0) {
         kputs("kernel: PANIC no filesystem on DSK unit 0\r\n");
         return 1;
     }
+    kputs("kernel: disk ");
+    kputs(bdev_name());
+    kputs("\r\n");
     kputs("kernel: fs mounted, free_blocks=");
     kputu(fs_freeblocks());
     kputs("\r\n");

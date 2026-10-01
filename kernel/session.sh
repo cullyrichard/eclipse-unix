@@ -5,7 +5,10 @@
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 out="${OUT:-$here/out}"
 {
-  echo "attach dsk $out/disk.img"
+  case "$(cat "$out/kdisk" 2>/dev/null || echo dsk)" in
+    dkp) echo "set dkp0 4231"; echo "attach dkp0 $out/disk.img" ;;
+    *)   echo "attach dsk $out/disk.img" ;;
+  esac
   cat "$out/kernel.simh"
   echo 'dep PC 50'
   while IFS= read -r line; do
