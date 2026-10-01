@@ -28,7 +28,7 @@ case "$kdisk" in
 esac
 echo "$kdisk" > "$out/kdisk"
 
-progs="init sh tar echo cat ls mkdir rm wc cp pwd fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
+progs="init sh tar ed echo cat ls mkdir rm wc cp pwd fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
 files=()
 for p in $progs; do
   ECLIPSE_CC_KEEP_ASM="$out/$p.s" "$cc" --ieee ${UCFLAGS:-} -o "$out/$p.simh" \

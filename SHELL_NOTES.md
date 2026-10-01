@@ -291,3 +291,23 @@ blocking and waking both ends dozens of times, and came out identical.
 - `pwd` handles at most 8 levels. `ls` has no sorting. Paths are limited
   to 64 bytes, and argv to 16 arguments and 256 bytes total.
 - Real hardware: untested, like the rest of the kernel.
+
+## 6. Userland additions
+
+- **`tar`**: magtape archives, POSIX ustar (FS_NOTES.md section 10).
+- **`ed`**: a V6-style line editor, `ed [-p prompt] [file]`.
+  - Addresses: `n . $ +n -n /re/ ?re? 'x a,b , ;`.
+  - Commands: `a i c d p n l = s/re/rep/[g][p|n] g/re/cmd v/re/cmd m t j k w W r e E f q Q u h`.
+  - Regular expressions: `^ $ . * [..] [^..] \( \) \1-\9`, with `&` and
+    `\1-\9` in replacements.
+  - Errors print `?`; `h` explains.
+  - Limits: 16 KB of text and 1000 lines, so that the program plus its
+    buffer fit in one 32KW process (the first version, with 20 KB and
+    1500 lines, came to 34497 words and didn't). Move is an in-place
+    rotation of the line index; copy is line by line.
+  - Tested by `kernel/edtest.py tests/ed_session.txt`, a scripted session
+    mixing shell and ed commands. Every command above behaved as
+    expected; `cat`/`wc` in the shell confirm the written files. The test
+    found an undo bug (`u` saved its own undo point first, so it undid
+    nothing); fixed. Building `ed` also turned up a compiler bug
+    (DEBUGGING_NOTES.md #45).

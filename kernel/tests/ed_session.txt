@@ -1,0 +1,39 @@
+$ mkdir /home ; cd /home
+$ ed -p 'ed* ' notes
+: a
+| line one
+| line two
+| line three
+| .
+: ,p
+: 2
+: s/two/2/p
+: g/line/s/line/LINE/
+: ,n
+: $a
+| the end
+| .
+: 1m$
+: ,p
+: u
+: ,p
+: 1t0
+: ,n
+: /three/
+: ?one?
+: s/\(LINE\) \(.*\)/\2 \1/p
+: 3,4j
+: ,l
+: x
+: h
+: w
+: q
+$ cat notes
+$ ed -p 'ed* ' notes
+: ,n
+: e /bin/../home/notes
+: 1,2d
+: w scratch
+: q
+$ cat scratch ; wc notes scratch
+$ exit 0

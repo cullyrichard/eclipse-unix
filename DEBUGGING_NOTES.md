@@ -4393,3 +4393,18 @@ call graph, so the worst case "fell" from 658 to 423 words and
 a jump-layout change can't change stack depth. `stackdepth.py` and
 `gapprof.py` now skip `Lrx_` labels, and the numbers are back to 658
 (dsk) ... 811 (zebra).
+
+### 45. `Cannot select: brcond` on a branch over a plain value (fixed)
+
+Found compiling `kernel/user/ed.c`. Minimal repro:
+`do { n++; } while (*t++ && re[0] != '^');`. The `&&` becomes a `phi i1`,
+legalized to `and x, 1`, and the `brcond` on it reached instruction
+selection unlowered. The backend registered BRCOND's Custom lowering
+(`LowerBRCOND` → `BR_CC` "branch if != 0") only under `MVT::i16`, but
+the legalizer looks BRCOND up by its *result* type, `MVT::Other`. A
+brcond on a `setcc` is folded into `BR_CC` before legalization, which hid
+this; DEBUGGING_NOTES #14 and #20 had patched two other shapes in the
+DAG combine instead. Fix (llvm-project): also register
+`setOperationAction(ISD::BRCOND, MVT::Other, Custom)`. The repro now
+compiles and returns `4 1 1` for three inputs exercising both `&&`
+arms. c-testsuite 206/220 in both modes, same set.

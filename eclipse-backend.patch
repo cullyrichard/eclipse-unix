@@ -1939,10 +1939,10 @@ index 000000000..4f78fbe16
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
 new file mode 100644
-index 000000000..cb8925bb5
+index 000000000..a7c44bae6
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
-@@ -0,0 +1,1825 @@
+@@ -0,0 +1,1832 @@
 +//===-- EclipseISelLowering.cpp - Eclipse DAG Lowering Implementation ---===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -2098,6 +2098,13 @@ index 000000000..cb8925bb5
 +  // re-legalized — unlike Expand, which is a one-shot legalization-time
 +  // rule with no such guarantee against post-legalize combines.
 +  setOperationAction(ISD::BRCOND, MVT::i16, Custom);
++  // The legalizer looks BRCOND up under its *result* type, MVT::Other --
++  // the i16 entry above is never consulted. A brcond on a setcc is folded
++  // into BR_CC before legalization, which hid this; a brcond on a plain
++  // value (e.g. the phi of `a && b` in a do-while condition, legalized to
++  // `and x, 1`) reached ISel raw: "Cannot select: brcond" (kernel/user/
++  // ed.c, DEBUGGING_NOTES.md #45).
++  setOperationAction(ISD::BRCOND, MVT::Other, Custom);
 +  setOperationAction(ISD::SETCC, MVT::i16, Custom);
 +  setOperationAction(ISD::SELECT, MVT::i16, Expand);
 +  setOperationAction(ISD::SELECT_CC, MVT::i16, Custom);
