@@ -58,12 +58,16 @@ int uvalid(unsigned int b, unsigned int len) {
     return 1;
 }
 
+static unsigned int upoll;
+
 static unsigned int ugetb(unsigned int b) {
+    TTY_POLL_EVERY(upoll, 3);  /* byte-at-a-time user copies */
     unsigned int w = kcopyin_word(b >> 1);
     return (b & 1) ? (w & 0377) : ((w >> 8) & 0377);
 }
 
 static void uputb(unsigned int b, unsigned int v) {
+    TTY_POLL_EVERY(upoll, 3);
     unsigned int w = kcopyin_word(b >> 1);
     if (b & 1) w = (w & 0177400) | (v & 0377);
     else w = (w & 0377) | ((v & 0377) << 8);
@@ -263,6 +267,7 @@ unsigned int sys_writefd(unsigned int fd, unsigned int ubuf, unsigned int n) {
             c = (int)ugetb(ubuf + i);
             if (c == '\n') console_putchar('\r');     /* ONLCR */
             console_putchar(c);
+            tty_poll();     /* polled TTO output is slow: check per char */
         }
         return n;
     }

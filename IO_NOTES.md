@@ -297,3 +297,10 @@ SIMH then rejects the string ("String must be quote delimited"). A
 `send after=N` queued at the top level before `run 50`/`go` was not
 delivered in this environment, on either this kernel or the unmerged
 branch.
+
+## Addendum: overrun mitigated (KERNEL_NOTES.md §11)
+
+Software polling of TTI in the kernel's long loops, plus a 16 ms time
+slice and a cheaper context switch, cut in-kernel keystroke latency from
+median 4900 / max 37000 instructions to median 450 / max 1400. At GAP
+2000 no characters are lost (0/60); at GAP 777, 8/60 still are.

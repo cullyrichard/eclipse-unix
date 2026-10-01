@@ -10,6 +10,7 @@
  * balloc) may evict them, so such code re-reads afterwards. */
 #include "fs.h"
 #include "../examples/dsk.h"
+#include "tty.h"
 #include "kdsk.h"
 
 #define NBUF 8
@@ -74,6 +75,7 @@ int fs_init(void) {
 static unsigned int balloc(void) {
     unsigned int blk, i, *b;
     for (blk = s_dstart; blk < s_nblocks; blk++) {
+        if ((blk & 3) == 0) tty_poll();
         b = bread(s_bmap + (blk >> 12));
         if ((b[(blk >> 4) & 0377] & bitmask[blk & 15]) == 0) {
             b[(blk >> 4) & 0377] |= bitmask[blk & 15];
@@ -98,6 +100,7 @@ static void bfree(unsigned int blk) {
 unsigned int fs_freeblocks(void) {
     unsigned int blk, n = 0, *b;
     for (blk = s_dstart; blk < s_nblocks; blk++) {
+        if ((blk & 3) == 0) tty_poll();
         b = bread(s_bmap + (blk >> 12));
         if ((b[(blk >> 4) & 0377] & bitmask[blk & 15]) == 0) n++;
     }
@@ -127,6 +130,7 @@ void fs_iwrite(unsigned int inum, const unsigned int *ip) {
 unsigned int fs_ialloc(unsigned int type) {
     unsigned int inum, i, ip[IWORDS];
     for (inum = ROOTINO + 1; inum < s_ninodes; inum++) {
+        if ((inum & 3) == 0) tty_poll();
         fs_iread(inum, ip);
         if (ip[I_TYPE] == T_FREE) {
             for (i = 0; i < IWORDS; i++) ip[i] = 0;
@@ -187,7 +191,10 @@ int fs_readi(unsigned int inum, unsigned int off, char *dst, unsigned int n) {
             for (j = 0; j < m; j++) dst[done + j] = 0;
         } else {
             cb = (char *)bread(blk);
-            for (j = 0; j < m; j++) dst[done + j] = cb[boff + j];
+            for (j = 0; j < m; j++) {
+                if ((j & 7) == 0) tty_poll();
+                dst[done + j] = cb[boff + j];
+            }
         }
         done += m;
         off += m;
@@ -210,7 +217,10 @@ int fs_writei(unsigned int inum, unsigned int off, const char *src, unsigned int
         if (blk == 0) break;                    /* disk full */
         b = bread(blk);
         cb = (char *)b;
-        for (j = 0; j < m; j++) cb[boff + j] = src[done + j];
+        for (j = 0; j < m; j++) {
+            if ((j & 7) == 0) tty_poll();
+            cb[boff + j] = src[done + j];
+        }
         bwrite(blk, b);
         done += m;
         off += m;

@@ -4295,7 +4295,7 @@ assumed to skip. In the merged kernel, 16 of the 25 slots became EJMPs.
 a per-test set identical to the committed `reorder_asm.py`. The merged
 kernel passes every shell and I/O test (KERNEL_NOTES.md §10).
 
-### 41. Large stack frames lose values through the shared `_scratch` word (OPEN, worked around)
+### 41. Large stack frames lose values through the shared `_scratch` word (FIXED, see end of entry)
 
 Found by the shell work (SHELL_NOTES.md). In a function whose frame is
 large enough that offsets need the large-offset path,
@@ -4304,3 +4304,16 @@ large-offset address sequence overwrites `_scratch`, which the surrounding
 load/store is still using. Worked around by making big arrays `static` in
 the shell, the utilities, `fstest` and the kernel's syscall path. The real
 fix belongs in `EclipseRegisterInfo::eliminateFrameIndex`. Not yet fixed.
+
+**Fixed** (llvm-project `7cc17d8e2`). The large-offset LDFI/STFI expansion
+in `eliminateFrameIndex` runs after register allocation. It can therefore
+land between an LDIND/STIND's `STA addr,_scratch` and its `@_scratch`
+access; for example, reloading a far local that feeds a pointer store
+(`pad[i] = i` with `i` at a large offset) overwrote the pointer. It now
+uses its own page-zero word, `_fscratch`, emitted next to `_scratch` and
+`_scratch2`. Large-offset expansions never nest, and each uses
+`_fscratch` strictly in sequence. Repros: `examples/frame_scratch_test.c`
+now prints `f=114`, `E=5 Ej=2` (was `f=10`, `E=4`, `Ej=0`). c-testsuite
+is 206/220 in both float modes, per-test set unchanged. The `static`
+workarounds in the shell and utilities are left in place: they are
+harmless, and they keep those frames small.

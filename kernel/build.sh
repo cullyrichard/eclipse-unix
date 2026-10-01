@@ -35,3 +35,16 @@ if [ "${KEEPDISK:-0}" = 1 ] && [ -f "$out/disk.img" ]; then
 else
   python3 "$here/fstools/mkfs.py" "$out/disk.img" "${files[@]}" ${EXTRA:-}
 fi
+
+# Kernel stack budget: the static worst-case depth (stackdepth.py, call
+# graph + SAVE frames; no recursion) must fit in a kernel stack with the
+# 16-word overflow guard (k_klim) and a 32-word margin for the trap-entry
+# argument push and the MUL/DIV/indirect-access temporaries.
+kstk=$(sed -n 's/^#define KSTK *\([0-9]*\).*/\1/p' "$here/proc.h")
+worst=$(python3 "$here/stackdepth.py" "$out/kernel.s" k_trap main | sed -n 's/.*worst case \([0-9]*\) words/\1/p' | sort -n | tail -1)
+if [ "$worst" -gt $((kstk - 16 - 32)) ]; then
+  echo "build.sh: kernel stack worst case $worst words exceeds KSTK=$kstk - 48" >&2
+  python3 "$here/stackdepth.py" "$out/kernel.s" k_trap >&2
+  exit 1
+fi
+echo "build.sh: kernel stack worst case $worst of $kstk words"

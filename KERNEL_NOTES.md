@@ -515,3 +515,64 @@ Verification of the merged kernel, re-running each branch's own evidence:
 | console wait, disk overlap (`ioinit`, 4000-dot spinner) | see IO_NOTES.md merge addendum |
 | `bigmem` as init | `errs=0` all rounds, 992 frames free |
 | c-testsuite, both float modes | 206/220, same set as before |
+
+## 11. Bug-fix pass: kernel stacks, time slice, keystroke latency
+
+**Kernel stacks sized from a proof, not a guess.** `kernel/stackdepth.py`
+computes the worst-case kernel stack depth from the call graph in
+`out/kernel.s`: `SAVE` frames, return blocks and argument pushes, with
+recursion rejected. The kernel has no recursion and no indirect calls.
+The model predicts 656 words; the measured high-water mark was 655. The
+deepest path is `open(O_CREAT)` → `fs_create` → path walk → `readi` →
+`bmap` → disk. `KSTK` went from 1024 to 768, and `build.sh` now fails if
+the computed worst case exceeds `KSTK - 16 (overflow guard) - 32`. That
+frees 2304 words: the kernel image is 27,936 words, about 3.3KW below
+32KW. The hardware overflow guard (vector 043, halt) is still there in
+case the model is ever wrong.
+
+**Time slice 0.8 ms → 16 ms.** `k_pitinit` was `0177770` (8 PIT counts),
+inherited from PROCESS_NOTES.md's timer probe. SIMH's PIT counts at
+10 kHz (`pit_tps`, matching DG's 100 us PIT). Under SIMH's deterministic
+clock (`set clock nocalibrate`, 5M instructions per pseudo-second), a PC
+profile of the I/O sweep workload put **two thirds of all samples in the
+context switch (`load`)**: a preemption about every 1700 instructions.
+Small layout shifts then swung total run time by 2x (3562 vs 7672 ticks
+for code differing only in two counters), through resonance with that
+tiny quantum. Now 160 counts (16 ms, about 60 Hz like V6): the same
+workload takes 205 ticks and 555 switches (was 3562 and 3494), `load`
+fell from 236 of 350 samples to 15, and user code is now the largest
+share of samples before shutdown. (Earlier tick counts in these notes
+are wall-clock calibrated and not comparable to these.)
+
+**Context switch.** `load()` copied a process's 32-word page-table row
+into `k_ptbuf` before `LMP`, about 2000 instructions with interrupts off.
+`LMP` now reads the row directly (`k_ptaddr`).
+
+**Keystroke latency (TTI overrun, IO_NOTES.md §5.4).** `tty_poll()`
+checks TTI Done (`SKPDZ 010`) and takes a waiting character exactly as
+the interrupt would. It is called from the kernel's long interrupts-off
+loops: `kfar_write` (every 8), user byte copies (every 4), fs block
+copies (every 8 bytes), block/inode scans (every 4), each console output
+character, and `sched()`. A trace showed chains of in-kernel
+sleep/wakeup switching kernel-to-kernel without ever enabling
+interrupts. Measured with `io_sweep.py LAT=1` (instructions until the
+kernel takes an injected keystroke, 60 points each):
+
+```
+                 before            after
+user/ION         max 100           max 100
+idle/ION         max 100           max 100
+kernel/noION     median 4900,      median 450,
+                 max 37000         max 1400
+```
+
+Functional test (type `x`, then CR GAP instructions later):
+- GAP 2000: 0 of 60 runs lose a character.
+- GAP 777: 8 of 60 still do (the I/O agent's sweep: 66 of 300).
+
+On real hardware a 9600-baud character arrives about every 1 ms, so
+back-to-back characters at full line speed can still occasionally
+collide; human typing cannot. A complete fix needs the kernel to run with
+interrupts enabled, which is a much larger change. Polling overhead:
+12,323 polls for the whole sweep workload, about 300K instructions,
+negligible.

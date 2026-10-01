@@ -407,6 +407,9 @@ static void save_cur(void) {
 /* LMP k_ptbuf into user map A now (not deferred to k_resume): a process
  * woken inside the kernel copies to/from its user memory through map A
  * before it ever gets back to k_resume. */
+/* Word address of the page-table row LMP loads (set by load()). */
+unsigned int k_ptaddr;
+
 static void mapA_load(void) {
     asm volatile(
         "ESTA 2,k_ks_ac2,0\n\t"          /* scratch save of AC2/AC3 */
@@ -414,7 +417,7 @@ static void mapA_load(void) {
         "SUB 0,0\n\t"
         "DOA 0,MAP\n\t"                  /* select A, user mode off */
         "ELDA 1,k_n32,0\n\t"
-        "ELEF 2,k_ptbuf,0\n\t"
+        "ELDA 2,k_ptaddr,0\n\t"        /* the process's own p_pt row */
         "SUB 0,0\n\t"
         "LMP\n\t"
         "ELDA 2,k_ks_ac2,0\n\t"
@@ -425,8 +428,11 @@ static void mapA_load(void) {
 static void load(int n) {
     int s;
     if (n != loaded) {
-        for (s = 0; s < NPAGES; s++)
-            k_ptbuf[s] = p_pt[(unsigned int)n * NPAGES + s];
+        /* LMP straight from the process's row: copying it into k_ptbuf
+         * first cost ~2000 instructions per switch with interrupts off
+         * (KERNEL_NOTES.md section 11). Pointers are byte addresses
+         * (DEBUGGING_NOTES.md #38); LMP wants the word address. */
+        k_ptaddr = (unsigned int)(unsigned long)&p_pt[(unsigned int)n * NPAGES] >> 1;
         mapA_load();
         k_reload = 0;
         loaded = n;
@@ -460,6 +466,10 @@ static void shutdown(void) {
     kputu(st_idle);
     kputs(" tty_intr=");
     kputu(tty_nintr);
+    kputs(" tty_polls=");
+    kputu(tty_ncalls);
+    kputs("/");
+    kputu(tty_npoll);
     kputs(" dsk_intr=");
     kputu(dsk_nintr);
     kputs(" dsk_sleeps=");
@@ -511,6 +521,12 @@ static void idle(void) {
 /* Round-robin: the next P_RUN slot after curproc (possibly curproc).
  * Never returns: every caller has already saved whatever it needs. */
 static void sched(void) {
+    /* A chain of in-kernel sleeps/wakeups switches kernel-to-kernel
+     * without ever re-enabling interrupts (only k_resume and the idle loop
+     * do), so take a waiting keystroke here too (IO_NOTES.md overrun fix;
+     * a trace showed 6767 instructions of sched/load/wakeup between a
+     * keystroke and its interrupt). */
+    tty_poll();
     int i, n, sleepers;
     n = curproc < 0 ? NPROC - 1 : curproc;
     for (i = 0; i < NPROC; i++) {
@@ -785,7 +801,13 @@ void k_trap(int cause) {
 
 /* PIT period: DOA loads the counter, which counts UP and interrupts on
  * wrapping past 0177777 (PROCESS_NOTES.md section 1). */
-unsigned int k_pitinit = 0177770;
+/* Time slice: the PIT counts at 10 kHz (100 us; eclipse_cpu.c pit_tps,
+ * matching DG's PIT) and interrupts when the count wraps past 0177777.
+ * 160 counts = 16 ms, about 60 Hz like V6 Unix. It used to be 8 counts
+ * (0.8 ms, from PROCESS_NOTES.md's timer probe, where fast ticks made
+ * testing easy): a deterministic-clock profile then showed two thirds of
+ * all CPU time in the context switch (load), KERNEL_NOTES.md section 11. */
+unsigned int k_pitinit = 0200000 - 160;
 unsigned int k_pimask = 0001;    /* PI_TTO only: TTI, DSK and PIT interrupt
                                     (TTO output stays polled, IO_NOTES.md) */
 

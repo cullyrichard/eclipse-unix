@@ -16,7 +16,7 @@
 static char tbuf[TTYBUF];
 static unsigned int thead, ttail, tcount;   /* ring buffer */
 static unsigned int tlines;                 /* complete lines buffered */
-unsigned int tty_nintr;                     /* statistics */
+unsigned int tty_nintr, tty_npoll, tty_ncalls;  /* statistics */
 
 static void tput(unsigned int c) {
     tbuf[ttail] = (char)c;
@@ -86,6 +86,20 @@ unsigned int tty_readline(char *k, unsigned int n) {
 unsigned int tty_getc(void) {
     tty_wait_line();
     return tcount > 0 ? tget() : '\n';
+}
+
+/* Software poll of TTI Done. SKPDZ skips the INC when Done is clear, so r
+ * is 1 exactly when a character is waiting; tty_intr() then takes it
+ * exactly as the interrupt would (DIAC clears Done and the request). */
+void tty_poll(void) {
+    unsigned int r;
+    tty_ncalls++;
+    asm volatile("SUB %0,%0\n\tSKPDZ 010\n\tINC %0,%0" : "=r"(r));
+    if (r) {
+        tty_npoll++;
+        tty_intr();
+        tty_nintr--;            /* counted as a poll, not an interrupt */
+    }
 }
 
 void tty_start(void) {

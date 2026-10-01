@@ -1,4 +1,7 @@
 #include "kmem.h"
+#include "tty.h"
+
+static unsigned int kpoll;
 
 /* Far access for the N-process kernel. Same single-cycle mechanism as
  * examples/mmpu.c (NIOP MAP from supervisor maps exactly the next memory
@@ -47,6 +50,7 @@ static void kfar_setB(unsigned int pfn) {
 }
 
 void kfar_write(unsigned int pfn, unsigned int off, unsigned int val) {
+    TTY_POLL_EVERY(kpoll, 7);   /* image loads, page zeroing: long loops */
     kfar_setB(pfn);
     _k_off = off & 01777;
     _k_val = val;

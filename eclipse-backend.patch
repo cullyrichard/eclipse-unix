@@ -806,10 +806,10 @@ index 000000000..a0154fe9c
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp
 new file mode 100644
-index 000000000..808e748f8
+index 000000000..a8eceba7b
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseAsmPrinter.cpp
-@@ -0,0 +1,568 @@
+@@ -0,0 +1,574 @@
 +//===-- EclipseAsmPrinter.cpp - Eclipse LLVM assembly writer ------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -984,6 +984,12 @@ index 000000000..808e748f8
 +  // see its own comment -- but it consumes through the next blank line
 +  // regardless, and this line is before that blank line).
 +  OutStreamer->emitRawText("var _scratch2 = 0");
++  // A third, used ONLY by eliminateFrameIndex's large-offset LDFI/STFI
++  // expansion (EclipseRegisterInfo.cpp). That expansion runs after
++  // register allocation and can land between an LDIND/STIND's
++  // `STA addr,_scratch` and its `@_scratch` access; sharing `_scratch`
++  // silently redirected the access (DEBUGGING_NOTES.md #41).
++  OutStreamer->emitRawText("var _fscratch = 0");
 +  OutStreamer->emitRawText("");
 +}
 +
@@ -5557,10 +5563,10 @@ index 000000000..9ffc1c1fc
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSEMACHINEFUNCTIONINFO_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseRegisterInfo.cpp b/llvm/lib/Target/Eclipse/EclipseRegisterInfo.cpp
 new file mode 100644
-index 000000000..e731db0bc
+index 000000000..75982fdd4
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseRegisterInfo.cpp
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,252 @@
 +//===-- EclipseRegisterInfo.cpp - Eclipse Register Information ----------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -5709,6 +5715,13 @@ index 000000000..e731db0bc
 +    // dedups identical constants — so 58 different offsets sharing the
 +    // same handful of set bits collectively costs at most ~16 words
 +    // instead of 58.
++    // Scratch word: `_fscratch`, NOT the shared `_scratch`. This runs
++    // post-RA, so it can be placed between an LDIND/STIND's
++    // `STA addr,_scratch` and its `@_scratch` access (e.g. a reload of a
++    // far local feeding a pointer store); reusing `_scratch` there
++    // overwrote the pointer and the access went to the wrong word
++    // (DEBUGGING_NOTES.md #41). Large-offset expansions never nest, and
++    // each uses `_fscratch` strictly in sequence.
 +    bool Negative = Offset < 0;
 +    uint64_t Mag = Negative ? static_cast<uint64_t>(-Offset)
 +                             : static_cast<uint64_t>(Offset);
@@ -5736,7 +5749,7 @@ index 000000000..e731db0bc
 +      Src = MI.getOperand(0).getReg();
 +      BuildMI(MBB, MI, DL, TII.get(Eclipse::STABS))
 +          .addReg(Src)
-+          .addExternalSymbol("_scratch");
++          .addExternalSymbol("_fscratch");
 +    }
 +
 +    // Loads have a spare register the way stores don't (operand 0, the
@@ -5778,19 +5791,19 @@ index 000000000..e731db0bc
 +    if (IsLoad) {
 +      BuildMI(MBB, MI, DL, TII.get(Eclipse::STABS))
 +          .addReg(AddrReg)
-+          .addExternalSymbol("_scratch");
++          .addExternalSymbol("_fscratch");
 +      BuildMI(MBB, MI, DL, TII.get(Eclipse::LDABSI), AddrReg)
-+          .addExternalSymbol("_scratch");
++          .addExternalSymbol("_fscratch");
 +    } else {
 +      Register ValReg = MRI.createVirtualRegister(&Eclipse::GPRRegClass);
 +      BuildMI(MBB, MI, DL, TII.get(Eclipse::LDABS), ValReg)
-+          .addExternalSymbol("_scratch");
++          .addExternalSymbol("_fscratch");
 +      BuildMI(MBB, MI, DL, TII.get(Eclipse::STABS))
 +          .addReg(AddrReg)
-+          .addExternalSymbol("_scratch");
++          .addExternalSymbol("_fscratch");
 +      BuildMI(MBB, MI, DL, TII.get(Eclipse::STABSI))
 +          .addReg(ValReg)
-+          .addExternalSymbol("_scratch");
++          .addExternalSymbol("_fscratch");
 +    }
 +    MI.eraseFromParent();
 +    return true; // MI is gone; caller must not touch it further.
