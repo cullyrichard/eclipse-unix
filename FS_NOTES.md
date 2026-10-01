@@ -342,3 +342,27 @@ them had stopped compiling when `fps.h` gained an explicit `fmt_flag`
 (commit `93fe9d7`); their 8 calls now pass `0`, which is exactly the
 old behavior, since the flag is ORed into the control words. None of
 these can run in SIMH (no FPS model), so they are only build-verified.
+
+## 8. The single filesystem lock: measured, kept
+
+Every syscall that can reach `fs.c` runs under one lock (IO_NOTES.md),
+and this was listed as an open item. Before designing finer-grained
+locking (per-buffer or per-inode, V6-style), it was measured.
+`KCFLAGS=-DFSLOCK_STATS` counts acquisitions, the waits, and whether the
+disk was busy at the moment of each wait. The autotest workload is the
+most contended one in the test set: `fstest`, then three concurrent
+`fswriter`s, a CPU-bound worker and a faulting process.
+
+```
+fslock acquisitions 1423, waits 8, waits while the disk was busy 8
+```
+
+Waiting is rare (0.6%), and every wait happened while the one disk
+controller was mid-transfer. A finer lock would only have moved those
+waiters from the lock to the controller. Console and pipe I/O already
+run outside the lock (`fsys_needslock`), so CPU-bound and terminal-bound
+processes are never held up by it. **Decision: keep the single lock.**
+It's worth revisiting with a second disk controller, or with a workload
+that mixes heavy cached reads with heavy writes. Re-measure with
+`FSLOCK_STATS` (this needs the interrupt-driven DSK backend; the polled
+backends hold the CPU during a transfer anyway).

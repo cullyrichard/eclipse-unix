@@ -63,3 +63,7 @@ static int kdsk_io(unsigned int blk, unsigned int *buf, int wr) {
 
 int bdev_read(unsigned int blk, unsigned int *buf)  { return kdsk_io(blk, buf, 0); }
 int bdev_write(unsigned int blk, unsigned int *buf) { return kdsk_io(blk, buf, 1); }
+
+#ifdef FSLOCK_STATS
+unsigned int bdev_busy(void) { return dsk_busy; }
+#endif

@@ -75,6 +75,13 @@ static unsigned int kstk_base(int slice) {
 
 /* statistics, printed at shutdown */
 unsigned int st_ticks, st_switches, st_syscalls, st_faults;
+#ifdef FSLOCK_STATS
+/* Measurement only (FS_NOTES.md section 8): how often a process waits for
+ * the fs lock, and whether the disk was busy at that moment. */
+extern unsigned int bdev_busy(void);
+unsigned int st_lk_acq, st_lk_wait, st_lk_wait_dskbusy;
+#endif
+
 
 static void k_halt(void) {
     asm volatile("HALT\n\t");
@@ -473,6 +480,10 @@ static void shutdown(void) {
     kputu(st_idle);
     kputs(" tty_intr=");
     kputu(tty_nintr);
+#ifdef FSLOCK_STATS
+    kputs(" fslock acq/wait/wait-while-disk-busy=");
+    kputu(st_lk_acq); kputs("/"); kputu(st_lk_wait); kputs("/"); kputu(st_lk_wait_dskbusy);
+#endif
     kputs(" tty_polls=");
     kputu(tty_ncalls);
     kputs("/");
@@ -596,6 +607,13 @@ __attribute__((noinline)) void ksleep(unsigned int chan) {
  * middle of an fs operation, and nothing else may enter fs.c/the buffer
  * cache until it is done (IO_NOTES.md). */
 static void fs_lock(void) {
+#ifdef FSLOCK_STATS
+    st_lk_acq++;
+    if (fs_locked) {
+        st_lk_wait++;
+        if (bdev_busy()) st_lk_wait_dskbusy++;
+    }
+#endif
     while (fs_locked) ksleep(CHAN_FSLOCK);
     fs_locked = 1;
 }
