@@ -34,6 +34,7 @@ unsigned int sys_dup(unsigned int fd);
 unsigned int sys_dup2(unsigned int fd, unsigned int nfd);
 unsigned int sys_pipe(unsigned int ufds);
 unsigned int sys_stat(unsigned int upath, unsigned int ust);
+unsigned int sys_rename(unsigned int ufrom, unsigned int uto);
 unsigned int fsys_syscall(unsigned int no, unsigned int a1, unsigned int a2,
                           unsigned int a3);
 

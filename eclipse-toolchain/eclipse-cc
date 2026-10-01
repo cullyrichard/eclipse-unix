@@ -238,7 +238,19 @@ build_and_assemble() {
     -O1) llcopt=(-O1) ;;
     -O2|-Os|-Oz) llcopt=(-O2) ;;
   esac
-  "$LLC" -mtriple="$TRIPLE" "${llc_float_flags[@]}" ${llcopt[@]+"${llcopt[@]}"} -filetype=asm "$stripped" -o "$asm"
+  # With only AC0/AC1 allocatable, the greedy allocator sometimes gives up
+  # ("ran out of registers": kernel sys_pipe at -Os, BASIC parsenum at
+  # -O1) on functions the basic allocator handles. Greedy's code is
+  # smaller (BASIC: ~1.8KW), so it stays the first choice and basic is
+  # the fallback (DEBUGGING_NOTES.md #48). -O0 uses the fast allocator.
+  if ! "$LLC" -mtriple="$TRIPLE" "${llc_float_flags[@]}" ${llcopt[@]+"${llcopt[@]}"} -filetype=asm "$stripped" -o "$asm" 2>"$work/llc.err"; then
+    if [ -n "$optflag" ] && grep -q "ran out of registers" "$work/llc.err"; then
+      echo "eclipse-cc: greedy register allocation failed ($(grep -o "in function '[^']*'" "$work/llc.err" | head -1)); using -regalloc=basic" >&2
+      "$LLC" -mtriple="$TRIPLE" "${llc_float_flags[@]}" ${llcopt[@]+"${llcopt[@]}"} -regalloc=basic -filetype=asm "$stripped" -o "$asm"
+    else
+      cat "$work/llc.err" >&2
+    fi
+  fi
 
   # Append the hand-written __addsf3_hw/__subsf3_hw assembly (see
   # rt/eclipse_hwfloat.s's own header comment) onto llc's own output

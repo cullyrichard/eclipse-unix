@@ -613,3 +613,79 @@ instruction count. SIMH's idle detection advances simulated time while
 the CPU sits in the idle loop, so ticks also depend on when scripted
 input happens to arrive (405 vs 212 ticks for these two builds with
 near-identical instruction counts).
+
+## 13. rename, ps, kill and ^C; the kernel at -Os
+
+New syscalls for the text and system tools (SHELL_NOTES.md section 6):
+
+| # | call | notes |
+|---|---|---|
+| 37 | `SYS_RENAME from, to` | `fs_rename`: add the new entry, then remove the old. A file at `to` is unlinked first, but not while it is open. A directory only moves within its own parent, so `..` and link counts stay right. |
+| 38 | `SYS_PSINFO pid, w[9]` | state, parent, pages (image + stack + segment), 12-byte name. The name is the last path component, saved at spawn. -1 past the last slot. |
+| 39 | `SYS_KILL pid` | see below. Refused for a free/zombie/embryo slot and for a parentless process (init). |
+| 18 | `SYS_FREEBLK what` | 0 free data blocks (the old call), 1 data blocks, 2 free inodes, 3 inodes. |
+
+**Killing.** The process exits with status -9 (`KILLSTAT`).
+
+- At the user boundary (preempted, `P_RUN` and not in the kernel, or
+  blocked in `wait`): it exits at once.
+- Inside the kernel (asleep, woken but not yet out, or the caller itself
+  in a syscall): `p_killed` is set, and the process exits at the end of
+  `do_syscall`. If it sleeps on the console (`CHAN_TTY`) or a pipe, it is
+  woken; those loops check `kkilled()` and return early. Disk and fs-lock
+  sleeps are short and run to completion.
+
+**^C** in `tty_intr` drops the typed-ahead input, echoes `^C` and only
+sets `tty_sigint`. `sched()` handles it on entry, because every caller of
+`sched()` has already saved the current process's state, so any process
+may exit there. `intr_fg()` kills every process its parent is
+`wait()`ing for, except a child of a parentless process (the login
+shell). It picks all targets before killing any, so killing a parent
+can't orphan a target and hide it. `tty_intr` can also run from
+`tty_poll()` deep inside kernel loops, which is why the kill can't
+happen in `tty_intr` itself.
+
+**The kernel now builds at -Os** (`KOPT`, default `-Os`). At -O0 these
+syscalls (+1720 words) put it over 32KW. At -Os it is 30762 words (dsk),
+against about 31900 at -O0. The code shrinks about 11%, but 6912 of the
+words are the nine 768-word kernel stacks. What the optimizer needed
+(DEBUGGING_NOTES.md #48):
+
+- `"memory"` clobbers on all 66 inline asm statements;
+- `volatile` + `used` on the statics that asm names only as text;
+- `noinline` on the functions whose asm defines labels;
+- a register-allocator fallback in `eclipse-cc` (`sys_pipe` needs the
+  basic allocator).
+
+`build.sh`'s first pass now sizes the boot stack at 768, not 1536
+(`main` needs about 450; the second pass sizes it exactly), or the RAM
+disk kernel's first pass didn't fit.
+
+Verification, all on the -Os kernel:
+
+| check | result |
+|---|---|
+| `tests/session_full.txt` (dsk) | same as the -O0 run, apart from inode numbers and the `/bin` count (11 new programs) |
+| same, KDISK=dkp (DG 4231) and KDISK=ram (tape only, no disk) | same output; ram: 736 frames free at the end (256 hold the RAM disk) |
+| autotest + rc, two boots | `fstest` 40/40, writers errs=0, `badptr` -2, free blocks 506 on both boots, `fsck` 0 problems after each |
+| `tests/session_keep.txt` | `fsck` 0 problems |
+| `tests/ed_session.txt`, `basic_session.txt`, `basic_deep.txt` | faults=0, 992 frames free. Both BASIC transcripts are identical to the -O0 kernel's apart from the final HALT address. |
+| `tests/tools_session.txt` | see SHELL_NOTES.md section 6 |
+
+**Keystroke latency on the -Os kernel.** I traced `tests/session_full.txt`
+under `kernel/gapprof.py` (full instruction trace; note that the
+Eclipse simulator writes it to `./trace.log`, whatever `set debug` says),
+and ran the committed -O0 kernel on the same session for comparison.
+Section 12's 1,936 came from a different workload.
+
+| kernel | longest unpolled stretch | where |
+|---|---|---|
+| committed, -O0 | 6,482 | `SYS_WRITE` (`sys_write_user`): the whole string out to the polled console with no `tty_poll` |
+| -Os | 5,338 | same path |
+| -Os, plus a poll per character in `sys_write_user` (as `sys_writefd` already had) | **3,229** | a polled DSK read wait inside `bread` (about 3,000 at -O0 too) |
+
+Session output is identical with and without the new poll. Open: at
+about 1 us per instruction, 3.2 ms is more than one 4800-baud
+character time (2.1 ms). So a continuous burst of typing during a
+polled disk read can still lose a character. The fix would be to poll
+inside the DSK wait loop.

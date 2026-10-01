@@ -1,0 +1,56 @@
+$ mkdir /t
+$ cd /t
+$ echo banana > f ; echo apple >> f ; echo cherry >> f ; echo apple >> f ; echo 10 >> f ; echo 9 >> f
+$ cat f
+$ sort f
+$ sort -r f
+$ sort -n f
+$ sort -u f
+$ grep apple f
+$ grep -n -v apple f
+$ grep -c '^[a-c]' f
+$ grep -i APPLE f
+$ grep 'an*a$' f
+$ grep '^[0-9][0-9]*$' f
+$ grep xyz f
+$ echo status $?
+$ head -3 f
+$ tail -2 f
+$ tail -n 1 f
+$ ls /bin | head -n 4
+$ ls /bin | tail -3
+$ ls /bin | sort -r | head -3
+$ od f
+$ od -c f
+$ od -b f
+$ cp f g ; cmp f g
+$ echo status $?
+$ echo extra >> g ; cmp f g
+$ echo status $?
+$ echo bxnana > h ; cmp f h
+$ mv g g2 ; ls
+$ mkdir d ; mv g2 h d ; ls d ; ls
+$ mv d/h f ; cat f
+$ mv d e ; ls
+$ mv e /e2
+$ mv nosuch x
+$ df
+$ ps
+$ cat | ps
+= cat | ps\r	\003
+$ echo after ^C status $?
+$ cat | kill 2
+$ echo kill status $?
+$ ps
+$ kill 0
+$ kill 99
+$ ls -l /bin | more
+= --More--	\r
+$ basic
+> 10 X=X+1
+| 20 GOTO 10
+| RUN
+= RUN\r	\003
+$ echo basic status $?
+$ df
+$ exit 0

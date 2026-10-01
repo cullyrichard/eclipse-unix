@@ -12,7 +12,7 @@ void console_putchar(int c) {
         "console_out_wait%=:\n\t"
         "SKPDN 011\n\t"
         "JMP console_out_wait%=\n\t"
-        :: "r"(c));
+        :: "r"(c) : "memory");
 }
 
 /* One-time NIOS 010 enable, then poll SKPDN + DIAC (clear-pulse read).
@@ -20,7 +20,7 @@ void console_putchar(int c) {
  * that file directly before writing this one. */
 int console_getchar(void) {
     if (!tti_enabled) {
-        asm volatile("NIOS 010");
+        asm volatile("NIOS 010" ::: "memory");
         tti_enabled = 1;
     }
     int c;
@@ -29,6 +29,6 @@ int console_getchar(void) {
         "SKPDN 010\n\t"
         "JMP console_in_wait%=\n\t"
         "DIAC %0,010\n\t"
-        : "=r"(c));
+        : "=r"(c) : : "memory");
     return c;
 }

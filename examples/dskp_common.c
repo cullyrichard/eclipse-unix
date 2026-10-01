@@ -53,13 +53,13 @@ asm("dev DSKP = 027");
 /* --- Bare (unpulsed) register loads and readbacks -- see
  * dskp_common.h's own comment on pulse discipline. --- */
 void dskp_doa(unsigned int word) {
-    asm volatile("DOA %0,DSKP" :: "r"(word));
+    asm volatile("DOA %0,DSKP" :: "r"(word) : "memory");
 }
 void dskp_doc(unsigned int word) {
-    asm volatile("DOC %0,DSKP" :: "r"(word));
+    asm volatile("DOC %0,DSKP" :: "r"(word) : "memory");
 }
 void dskp_dob(unsigned int word) {
-    asm volatile("DOB %0,DSKP" :: "r"(word));
+    asm volatile("DOB %0,DSKP" :: "r"(word) : "memory");
 }
 /* Bare DIA/DIB -- does not clear status. Several callers (all three
  * variants' own Phase I/III control-full or ready checks) re-read the
@@ -68,12 +68,12 @@ void dskp_dob(unsigned int word) {
  * DIA (STORAGE_NOTES.md). */
 unsigned int dskp_dia(void) {
     unsigned int r;
-    asm volatile("DIA %0,DSKP" : "=r"(r));
+    asm volatile("DIA %0,DSKP" : "=r"(r) : : "memory");
     return r;
 }
 unsigned int dskp_dib(void) {
     unsigned int r;
-    asm volatile("DIB %0,DSKP" : "=r"(r));
+    asm volatile("DIB %0,DSKP" : "=r"(r) : : "memory");
     return r;
 }
 
@@ -83,7 +83,7 @@ unsigned int dskp_dib(void) {
  * SKPDN/SKPBN; each variant's own file decides how (or whether) it
  * waits for seek completion. */
 void dskp_docp_seek(unsigned int cylinder) {
-    asm volatile("DOCP %0,DSKP" :: "r"(cylinder & 0x03FFu));
+    asm volatile("DOCP %0,DSKP" :: "r"(cylinder & 0x03FFu) : "memory");
 }
 
 /* Specify Memory Address + S pulse, combined, then poll for Done.
@@ -96,5 +96,5 @@ void dskp_dobs_start(unsigned int mem_addr_word) {
         "dskp_rw_wait%=:\n\t"
         "SKPDN DSKP\n\t"
         "JMP dskp_rw_wait%=\n\t"
-        :: "r"(mem_addr_word));
+        :: "r"(mem_addr_word) : "memory");
 }

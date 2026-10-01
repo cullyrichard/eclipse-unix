@@ -45,7 +45,7 @@ void bdev_intr(void) { }
 
 static unsigned int dkp_sta(void) {
     unsigned int s;
-    asm volatile("DIA %0,033" : "=r"(s));
+    asm volatile("DIA %0,033" : "=r"(s) : : "memory");
     return s;
 }
 
@@ -55,20 +55,20 @@ static int dkp_xfer(unsigned int blk, unsigned int *buf, unsigned int cmd) {
     cyl = blk / DKP_PERCYL;
     rem = blk % DKP_PERCYL;
     ussc = ((rem / DKP_SECT) << 9) | ((rem % DKP_SECT) << 4) | 017; /* 1 sector */
-    asm volatile("NIOC 033");
-    asm volatile("DOC %0,033" :: "r"(ussc));
+    asm volatile("NIOC 033" ::: "memory");
+    asm volatile("DOC %0,033" :: "r"(ussc) : "memory");
     fccy = FCCY_CLR | CMD_SEEK | cyl;
-    asm volatile("DOA %0,033" :: "r"(fccy));
-    asm volatile("NIOP 033");
+    asm volatile("DOA %0,033" :: "r"(fccy) : "memory");
+    asm volatile("NIOP 033" ::: "memory");
     while ((dkp_sta() & STA_SKDN0) == 0) tty_poll();
-    asm volatile("NIOC 033");
-    asm volatile("DOB %0,033" :: "r"((unsigned int)(unsigned long)buf >> 1));
-    asm volatile("DOC %0,033" :: "r"(ussc));
+    asm volatile("NIOC 033" ::: "memory");
+    asm volatile("DOB %0,033" :: "r"((unsigned int)(unsigned long)buf >> 1) : "memory");
+    asm volatile("DOC %0,033" :: "r"(ussc) : "memory");
     fccy = FCCY_CLR | cmd | cyl;
-    asm volatile("DOA %0,033" :: "r"(fccy));
-    asm volatile("NIOS 033");
+    asm volatile("DOA %0,033" :: "r"(fccy) : "memory");
+    asm volatile("NIOS 033" ::: "memory");
     while (((st = dkp_sta()) & STA_DONE) == 0) tty_poll();
-    asm volatile("NIOC 033");
+    asm volatile("NIOC 033" ::: "memory");
     return (st & STA_EFLGS) ? -1 : 0;
 }
 

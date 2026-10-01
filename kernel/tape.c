@@ -28,18 +28,18 @@ unsigned int mta_buf[256];
 
 static unsigned int mta_st1(void) {
     unsigned int s;
-    asm volatile("DIA %0,022" : "=r"(s));
+    asm volatile("DIA %0,022" : "=r"(s) : : "memory");
     return s;
 }
 
 static unsigned int mta_done(void) {
     unsigned int r;
-    asm volatile("SUB %0,%0\n\tSKPDZ 022\n\tINC %0,%0" : "=r"(r));
+    asm volatile("SUB %0,%0\n\tSKPDZ 022\n\tINC %0,%0" : "=r"(r) : : "memory");
     return r;
 }
 
 static void mta_select(unsigned int cu) {
-    asm volatile("DOA %0,022" :: "r"(cu));
+    asm volatile("DOA %0,022" :: "r"(cu) : "memory");
 }
 
 /* wait until the selected unit is ready (not rewinding); 0 = ready, -1 =
@@ -58,7 +58,7 @@ static int mta_ready(unsigned int unit) {
 int mta_rewind(unsigned int unit) {
     if (mta_ready(unit) < 0) return -1;
     mta_select(CMD_REWIND | (unit & 7));
-    asm volatile("NIOS 022");
+    asm volatile("NIOS 022" ::: "memory");
     return mta_ready(unit);
 }
 
@@ -69,14 +69,14 @@ static int mta_xfer(unsigned int unit, unsigned int cmd, unsigned int words) {
     if (mta_ready(unit) < 0) return -1;
     wa = (unsigned int)(unsigned long)mta_buf >> 1;
     cnt = (unsigned int)(0 - words);
-    asm volatile("DOB %0,022" :: "r"(wa));
-    asm volatile("DOC %0,022" :: "r"(cnt));
+    asm volatile("DOB %0,022" :: "r"(wa) : "memory");
+    asm volatile("DOC %0,022" :: "r"(cnt) : "memory");
     mta_select(cmd | (unit & 7));
-    asm volatile("NIOS 022");
+    asm volatile("NIOS 022" ::: "memory");
     while (!mta_done()) tty_poll();
     st = mta_st1();
-    asm volatile("DIB %0,022" : "=r"(ma));
-    asm volatile("NIOC 022");
+    asm volatile("DIB %0,022" : "=r"(ma) : : "memory");
+    asm volatile("NIOC 022" ::: "memory");
     if (cmd == CMD_READ && (st & ST1_EOF)) return 0;
     if (st & ST1_ERR) return -1;
     return (int)(ma - wa);
@@ -92,10 +92,10 @@ int mta_weof(unsigned int unit) {
     unsigned int st;
     if (mta_ready(unit) < 0) return -1;
     mta_select(CMD_WEOF | (unit & 7));
-    asm volatile("NIOS 022");
+    asm volatile("NIOS 022" ::: "memory");
     while (!mta_done()) tty_poll();
     st = mta_st1();
-    asm volatile("NIOC 022");
+    asm volatile("NIOC 022" ::: "memory");
     return (st & ST1_ERR) ? -1 : 0;
 }
 

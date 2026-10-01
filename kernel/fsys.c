@@ -236,6 +236,7 @@ unsigned int sys_read(unsigned int fd, unsigned int ubuf, unsigned int n) {
         if (n == 0) return 0;
         while (pc[pi] == 0) {
             if (pw[pi] == 0) return 0;          /* no writers: EOF */
+            if (kkilled()) return 0177777;
             ksleep(CHAN_PIPE + pi);
         }
         m = n < pc[pi] ? n : pc[pi];
@@ -277,6 +278,7 @@ unsigned int sys_writefd(unsigned int fd, unsigned int ubuf, unsigned int n) {
         if (n == 0) return 0;
         while (pc[pi] == PIPESZ) {
             if (pr[pi] == 0) return 0177777;   /* no readers: EPIPE */
+            if (kkilled()) return 0177777;
             ksleep(CHAN_PIPE + pi);
         }
         if (pr[pi] == 0) return 0177777;
@@ -325,6 +327,23 @@ unsigned int sys_unlink(unsigned int upath) {
     inum = fs_namei(path);
     if (inum == 0 || inum_open(inum)) return 0177777;
     return fs_unlink(path) < 0 ? 0177777 : 0;
+}
+
+/* SYS_RENAME. The second path goes in a static: fs-lock protected, and
+ * two FS_MAXPATH buffers on this frame would grow every kernel stack. */
+static char path2[FS_MAXPATH];
+
+unsigned int sys_rename(unsigned int ufrom, unsigned int uto) {
+    char path[FS_MAXPATH];
+    unsigned int t, ip[IWORDS];
+    if (ucopystr(ufrom, path, FS_MAXPATH) < 0 ||
+        ucopystr(uto, path2, FS_MAXPATH) < 0) return 0177777;
+    t = fs_namei(path2);
+    if (t != 0 && t != fs_namei(path)) {        /* replace an existing file */
+        if (fs_iread(t, ip) < 0 || ip[I_TYPE] != T_FILE || inum_open(t) ||
+            fs_unlink(path2) < 0) return 0177777;
+    }
+    return fs_rename(path, path2) < 0 ? 0177777 : 0;
 }
 
 /* ---- SHELL_NOTES.md: cwd, dup, pipes -------------------------------------- */
@@ -423,5 +442,6 @@ unsigned int fsys_syscall(unsigned int no, unsigned int a1, unsigned int a2,
     if (no == SYS_DUP2) return sys_dup2(a1, a2);
     if (no == SYS_PIPE) return sys_pipe(a1);
     if (no == SYS_STAT) return sys_stat(a1, a2);
+    if (no == SYS_RENAME) return sys_rename(a1, a2);
     return 0177777;
 }

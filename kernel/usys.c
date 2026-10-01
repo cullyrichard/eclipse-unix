@@ -117,3 +117,10 @@ void uputsfd(int fd, const char *s) { write(fd, s, ustrlen(s)); }
 int tape(int op, int unit, char *buf, int n) {
     return __syscall3(SYS_TAPE, (op & 0377) | (unit << 8), (int)buf, n);
 }
+
+int rename(const char *from, const char *to) {
+    return __syscall(SYS_RENAME, (int)from, (int)to);
+}
+int psinfo(int pid, unsigned int *w) { return __syscall(SYS_PSINFO, pid, (int)w); }
+int kill(int pid)                    { return __syscall(SYS_KILL, pid, 0); }
+int fsinfo(int what)                 { return __syscall(SYS_FREEBLK, what, 0); }

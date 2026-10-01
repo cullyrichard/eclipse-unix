@@ -2117,3 +2117,24 @@ float sf_sqrt(float a) {
   }
   return x;
 }
+
+/* ---- variable-count 16-bit shifts (DEBUGGING_NOTES.md #48) ---------------
+ * llc calls these for a shift whose count isn't a compile-time constant
+ * (EclipseISelLowering.cpp LowerShift). One-bit steps with constant
+ * shifts only, so nothing here can turn back into a variable shift; this
+ * file is always compiled at -O0 (eclipse-cc). A count of 16 or more
+ * gives 0 (or all sign bits for >>), like the constant-shift lowering. */
+int __ashlhi3(int x, int n) {
+    unsigned int v = (unsigned int)x;
+    while (n-- > 0 && v) v <<= 1;
+    return (int)v;
+}
+int __lshrhi3(int x, int n) {
+    unsigned int v = (unsigned int)x;
+    while (n-- > 0 && v) v >>= 1;
+    return (int)v;
+}
+int __ashrhi3(int x, int n) {
+    while (n-- > 0 && x != 0 && x != -1) x >>= 1;
+    return x;
+}

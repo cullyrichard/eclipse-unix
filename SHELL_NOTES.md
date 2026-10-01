@@ -351,3 +351,42 @@ blocking and waking both ends dozens of times, and came out identical.
     deep: every case either gives the answer or `?FORMULA TOO COMPLEX`,
     and the process exits normally. With the guard disabled, the same
     file hangs the machine.
+- **Text and system tools** (`kernel/user/uio.h` is their shared
+  buffered input/output):
+  - `grep [-vcni] pattern [file...]`: `c . [..] [^..] [a-z] x* ^ $ \c`.
+    Status 0 if a line matched, 1 if none, 2 on error.
+  - `head [-n N|-N]`, `tail [-n N|-N]`. `tail` keeps the last 8 KB, so it
+    works on pipes.
+  - `sort [-rnu] [file...]`, in memory: 16000 bytes and 1200 lines.
+  - `od [-bcw] [file]`: octal 16-bit words (the default) or bytes or
+    characters, with octal offsets, and `*` for repeated lines.
+  - `cmp file1 file2`: `differ: char N, line M` or `EOF on f`. Status
+    0/1/2.
+  - `mv from to`, or `mv file... dir`: SYS_RENAME. A file already at the
+    target is replaced. A directory moves only within its own parent.
+  - `more [file...]`: 22 lines, then `--More--`. Return continues and
+    `q` Return stops. Keys come from the console (SYS_GETCHAR), so
+    `... | more` works.
+  - `ps`: PID, PPID, state, pages and name, from SYS_PSINFO.
+  - `kill pid...`: SYS_KILL. The process exits with status -9.
+  - `df`: data blocks and inodes, total/used/free, from SYS_FREEBLK(what).
+  - **^C** kills the foreground job, meaning every process its parent is
+    `wait()`ing for, except the login shell (KERNEL_NOTES.md section 13).
+  - Tested by `edtest.py tests/tools_session.txt`, which checks every
+    tool and option above against the expected output by hand.
+    Highlights:
+    - `sort -n` puts non-numbers (value 0) first, ties in byte order.
+    - `grep 'an*a$'` matches `banana`; `grep xyz` gives status 1.
+    - `od` words agree with `od -b`.
+    - `cmp` reports EOF and the first difference (char 2, line 1).
+    - `mv`: renames, moves into a directory, replaces a file, renames a
+      directory, and refuses a directory to another parent and a missing
+      source.
+    - `df` is the same before and after the session.
+    - `cat | ps` then ^C: `cat`, asleep on the console, is killed and
+      the shell returns.
+    - `cat | kill 2` kills that `cat`; `kill 0` (init) and `kill 99`
+      are refused.
+    - `ls -l /bin | more` stops once at `--More--`.
+    - BASIC running `10 X=X+1 : 20 GOTO 10` stops at ^C with status -9.
+    - At shutdown: faults=0 and all 992 frames free.

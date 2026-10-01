@@ -44,7 +44,9 @@
 #define SYS_UNLINK   15   /* path (not while open; dirs must be empty) */
 #define SYS_SPAWN    16   /* path -> pid of a new child running that file */
 #define SYS_WAIT     17   /* pid (a child) -> its exit status; blocks */
-#define SYS_FREEBLK  18   /* -> free data blocks on the filesystem */
+#define SYS_FREEBLK  18   /* what -> 0 free data blocks, 1 data blocks,
+                             2 free inodes, 3 inodes (SYS_FREEBLK(0) is
+                             the old no-argument call) */
 
 /* Shell support (SHELL_NOTES.md). */
 #define SYS_SPAWNV   30   /* path, argv (char *[], NULL-terminated; 0 = {path}) -> pid */
@@ -56,5 +58,19 @@
 #define SYS_TAPE     36   /* op | unit<<8, buf, nbytes (kernel/tape.h TP_*):
                              rewind, read/write one record (<= 512 bytes,
                              even address), write tape mark, status */
+
+/* Text and system tools (SHELL_NOTES.md section 6). */
+#define SYS_RENAME   37   /* from, to -> 0 or -1. An existing file `to` is
+                             replaced (not while open); a directory moves
+                             only within its own parent. */
+#define SYS_PSINFO   38   /* pid, unsigned w[9] -> 0, or -1 past the last
+                             slot: w = {state (P_* in proc.h, 0 = free),
+                             parent, pages, name[12 bytes packed]} */
+#define SYS_KILL     39   /* pid -> 0 or -1. The process exits with status
+                             -9; one asleep in the kernel exits when its
+                             syscall returns (tty/pipe waits end early).
+                             ^C on the console kills every child its
+                             parent is wait()ing for, except the login
+                             shell (KERNEL_NOTES.md). */
 
 #endif

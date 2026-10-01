@@ -1940,10 +1940,10 @@ index 000000000..4f78fbe16
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
 new file mode 100644
-index 000000000..94dda753c
+index 000000000..db7898548
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseISelLowering.cpp
-@@ -0,0 +1,1853 @@
+@@ -0,0 +1,1865 @@
 +//===-- EclipseISelLowering.cpp - Eclipse DAG Lowering Implementation ---===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -2309,6 +2309,10 @@ index 000000000..94dda753c
 +  setLibcallImpl(RTLIB::FPTOUINT_F32_I32,
 +                 UseHW ? RTLIB::impl___fixunssfsi_hw
 +                       : RTLIB::impl___fixunssfsi);
++  // Variable-count shifts (LowerShift; DEBUGGING_NOTES.md #48).
++  setLibcallImpl(RTLIB::SHL_I16, RTLIB::impl___ashlhi3);
++  setLibcallImpl(RTLIB::SRL_I16, RTLIB::impl___lshrhi3);
++  setLibcallImpl(RTLIB::SRA_I16, RTLIB::impl___ashrhi3);
 +
 +  // Same "Unsupported means empty symbol name, not a graceful error"
 +  // trap as the float libcalls above, hit via a completely different
@@ -2665,11 +2669,19 @@ index 000000000..94dda753c
 +                       Op.getOperand(0),
 +                       DAG.getConstant(WrappedAmt, SDLoc(Op), MVT::i16));
 +  auto *AmtNode = dyn_cast<ConstantSDNode>(Op.getOperand(1));
-+  if (!AmtNode)
-+    report_fatal_error(
-+        "Eclipse backend only supports shifts by a compile-time constant "
-+        "amount (no variable-count shift/rotate hardware is exposed yet — "
-+        "see README.md)");
++  if (!AmtNode) {
++    // A run-time shift count: call the runtime (eclipse_rt.c __ashlhi3/
++    // __lshrhi3/__ashrhi3, one-bit steps). Before this, any variable
++    // shift or rotate stopped llc with a fatal error (DEBUGGING_NOTES.md
++    // #48).
++    RTLIB::Libcall LC = Op.getOpcode() == ISD::SHL   ? RTLIB::SHL_I16
++                        : Op.getOpcode() == ISD::SRL ? RTLIB::SRL_I16
++                                                     : RTLIB::SRA_I16;
++    SDValue Amt = DAG.getZExtOrTrunc(Op.getOperand(1), dl, MVT::i16);
++    SDValue Ops[2] = {X, Amt};
++    TargetLowering::MakeLibCallOptions CallOptions;
++    return makeLibCall(DAG, LC, MVT::i16, Ops, CallOptions, dl).first;
++  }
 +  uint64_t Amt = AmtNode->getZExtValue();
 +
 +  if (Op.getOpcode() == ISD::SHL) {
@@ -4639,10 +4651,10 @@ index 000000000..9a6d041d3
 +#endif // LLVM_LIB_TARGET_ECLIPSE_ECLIPSEINSTRINFO_H
 diff --git a/llvm/lib/Target/Eclipse/EclipseInstrInfo.td b/llvm/lib/Target/Eclipse/EclipseInstrInfo.td
 new file mode 100644
-index 000000000..52917c85c
+index 000000000..247b75beb
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseInstrInfo.td
-@@ -0,0 +1,810 @@
+@@ -0,0 +1,821 @@
 +//===- EclipseInstrInfo.td - Eclipse Instruction defs ------*- tablegen -*-=//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -5392,11 +5404,22 @@ index 000000000..52917c85c
 +// is kept defined (still handled by expandPostRAPseudo) but is now
 +// unreferenced by any pattern — left in place rather than deleted, in
 +// case anything else ever needs a remainder-only pseudo again.
-+let Defs = [AC2] in {
++// Outputs are tied to inputs (DEBUGGING_NOTES.md #48). Only AC0/AC1 are
++// allocatable, and UDIVREMrr writes both: an input still live after the
++// instruction then needed a third register, and greedy regalloc gave up
++// ("ran out of registers", kernel sys_pipe at -Os, BASIC parsenum at
++// -O1). Tied, the two-address pass copies the inputs first, so the
++// instruction itself only ever touches its own two registers and a
++// live-through value can be spilled around it. The expansion
++// (EclipseInstrInfo.cpp) reads RHS into AC2 before it overwrites AC1, so
++// it is correct whichever of AC0/AC1 each operand lands in.
++let Defs = [AC2], Constraints = "$dst = $lhs" in {
 +def MULrr : EclipsePseudo<(outs GPR:$dst), (ins GPR:$lhs, GPR:$rhs), "# MUL",
 +                           [(set GPR:$dst, (mul GPR:$lhs, GPR:$rhs))]>;
 +def UDIVrr : EclipsePseudo<(outs GPR:$dst), (ins GPR:$lhs, GPR:$rhs), "# UDIV", []>;
 +def UREMrr : EclipsePseudo<(outs GPR:$dst), (ins GPR:$lhs, GPR:$rhs), "# UREM", []>;
++}
++let Defs = [AC2], Constraints = "$quot = $lhs, $rem = $rhs" in {
 +
 +// Combined quotient+remainder pseudo: see the long comment above. Built
 +// directly as a machine node by EclipseISelLowering.cpp's LowerUDIVREM
@@ -5969,10 +5992,10 @@ index 000000000..fb7731dbb
 +def GPR : RegisterClass<"Eclipse", [i16], 16, (add AC0, AC1, AC2, AC3)>;
 diff --git a/llvm/lib/Target/Eclipse/EclipseSubtarget.cpp b/llvm/lib/Target/Eclipse/EclipseSubtarget.cpp
 new file mode 100644
-index 000000000..dfc9f5802
+index 000000000..79bc8f0af
 --- /dev/null
 +++ b/llvm/lib/Target/Eclipse/EclipseSubtarget.cpp
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,117 @@
 +//===-- EclipseSubtarget.cpp - Eclipse Subtarget Information -------------===//
 +//
 +// Part of the LLVM Project, under the Apache License v2.0 with LLVM
@@ -6085,6 +6108,10 @@ index 000000000..dfc9f5802
 +  Info.setLibcallImpl(RTLIB::MEMMOVE, RTLIB::impl_memmove);
 +  Info.setLibcallImpl(RTLIB::MEMSET, RTLIB::impl_memset);
 +  Info.setLibcallImpl(RTLIB::MEMCMP, RTLIB::impl_memcmp);
++  // Variable-count shifts: see EclipseISelLowering.cpp LowerShift.
++  Info.setLibcallImpl(RTLIB::SHL_I16, RTLIB::impl___ashlhi3);
++  Info.setLibcallImpl(RTLIB::SRL_I16, RTLIB::impl___lshrhi3);
++  Info.setLibcallImpl(RTLIB::SRA_I16, RTLIB::impl___ashrhi3);
 +}
 diff --git a/llvm/lib/Target/Eclipse/EclipseSubtarget.h b/llvm/lib/Target/Eclipse/EclipseSubtarget.h
 new file mode 100644

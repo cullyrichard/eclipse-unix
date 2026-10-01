@@ -120,6 +120,20 @@ unsigned int fs_freeblocks(void) {
     return n;
 }
 
+/* SYS_FREEBLK: 0 free data blocks, 1 data blocks, 2 free inodes, 3 inodes */
+unsigned int fs_info(unsigned int what) {
+    unsigned int inum, n, ip[IWORDS];
+    if (what == 0) return fs_freeblocks();
+    if (what == 1) return s_nblocks - s_dstart;
+    if (what == 3) return s_ninodes - 1;        /* inode 0 is never used */
+    n = 0;
+    for (inum = ROOTINO + 1; inum < s_ninodes; inum++) {
+        fs_iread(inum, ip);
+        if (ip[I_TYPE] == T_FREE) n++;
+    }
+    return n;
+}
+
 /* ---- inodes ------------------------------------------------------------ */
 
 int fs_iread(unsigned int inum, unsigned int *ip) {
@@ -445,6 +459,29 @@ static int dir_empty(unsigned int dinum) {
         if (dent_inum(de) != 0) return 0;
     }
     return 1;
+}
+
+static int isdots(const char *n) {
+    return n[0] == '.' && (n[1] == 0 || (n[1] == '.' && n[2] == 0));
+}
+
+/* Move one directory entry. The target must not exist (sys_rename removes
+ * a file there first); a directory may only be renamed within its parent,
+ * so its ".." and every link count stay right. */
+int fs_rename(const char *from, const char *to) {
+    unsigned int p1, p2, i, ip[IWORDS];
+    char n1[DIRSIZ + 1], n2[DIRSIZ + 1];
+    p1 = fs_nameiparent(from, n1);
+    if (p1 == 0 || isdots(n1)) return -1;
+    i = fs_dirlookup(p1, n1);
+    if (i == 0) return -1;
+    p2 = fs_nameiparent(to, n2);
+    if (p2 == 0 || isdots(n2) || n2[0] == 0) return -1;
+    if (fs_dirlookup(p2, n2) == i) return 0;    /* same file */
+    if (fs_dirlookup(p2, n2) != 0) return -1;
+    if (fs_iread(i, ip) < 0 || (ip[I_TYPE] == T_DIR && p1 != p2)) return -1;
+    if (fs_dirlink(p2, n2, i) < 0) return -1;
+    return fs_dirunlink(p1, n1);
 }
 
 int fs_unlink(const char *path) {

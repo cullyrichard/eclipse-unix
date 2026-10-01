@@ -30,8 +30,8 @@ const char *bdev_name(void) { return "dsk (DG 4019)"; }
 void bdev_intr(void) {
     unsigned int st;
     bdev_nintr++;
-    asm volatile("DIA %0,020" : "=r"(st));
-    asm volatile("NIOC 020");                /* clear Done: drops the request */
+    asm volatile("DIA %0,020" : "=r"(st) : : "memory");
+    asm volatile("NIOC 020" ::: "memory");                /* clear Done: drops the request */
     if (dsk_busy) {
         dsk_status = st;
         dsk_done = 1;
@@ -49,10 +49,10 @@ static int kdsk_io(unsigned int blk, unsigned int *buf, int wr) {
     dsk_busy = 1;
     dsk_done = 0;
     wa = (unsigned int)(unsigned long)buf >> 1;  /* DMA wants a word address */
-    asm volatile("DOA %0,020" :: "r"(blk));
-    asm volatile("DOB %0,020" :: "r"(wa));
-    if (wr) asm volatile("NIOP 020");
-    else asm volatile("NIOS 020");
+    asm volatile("DOA %0,020" :: "r"(blk) : "memory");
+    asm volatile("DOB %0,020" :: "r"(wa) : "memory");
+    if (wr) asm volatile("NIOP 020" ::: "memory");
+    else asm volatile("NIOS 020" ::: "memory");
     while (!dsk_done) {
         bdev_nsleep++;
         ksleep(CHAN_DSK);

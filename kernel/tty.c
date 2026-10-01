@@ -17,6 +17,7 @@ static char tbuf[TTYBUF];
 static unsigned int thead, ttail, tcount;   /* ring buffer */
 static unsigned int tlines;                 /* complete lines buffered */
 unsigned int tty_nintr, tty_npoll, tty_ncalls;  /* statistics */
+unsigned int tty_sigint;
 
 static void tput(unsigned int c) {
     tbuf[ttail] = (char)c;
@@ -35,9 +36,19 @@ static unsigned int tget(void) {
 void tty_intr(void) {
     unsigned int c;
     tty_nintr++;
-    asm volatile("DIAC %0,010" : "=r"(c));
+    asm volatile("DIAC %0,010" : "=r"(c) : : "memory");
     c &= 0177;
     if (c == '\r') c = '\n';
+    if (c == 003) {                             /* ^C: drop typed-ahead */
+        thead = ttail = tcount = tlines = 0;    /* input, and let sched() */
+        tty_sigint = 1;                         /* kill the foreground */
+        console_putchar('^');
+        console_putchar('C');
+        console_putchar('\r');
+        console_putchar('\n');
+        wakeup(CHAN_TTY);
+        return;
+    }
     if (c == 010 || c == 0177) {                /* erase */
         if (tcount > 0) {
             unsigned int last = (ttail + TTYBUF - 1) % TTYBUF;
@@ -65,7 +76,7 @@ void tty_intr(void) {
 }
 
 static void tty_wait_line(void) {
-    while (tlines == 0 && tcount < TTYBUF - 1)
+    while (tlines == 0 && tcount < TTYBUF - 1 && !kkilled())
         ksleep(CHAN_TTY);
 }
 
@@ -94,7 +105,7 @@ unsigned int tty_getc(void) {
 void tty_poll(void) {
     unsigned int r;
     tty_ncalls++;
-    asm volatile("SUB %0,%0\n\tSKPDZ 010\n\tINC %0,%0" : "=r"(r));
+    asm volatile("SUB %0,%0\n\tSKPDZ 010\n\tINC %0,%0" : "=r"(r) : : "memory");
     if (r) {
         tty_npoll++;
         tty_intr();
@@ -103,5 +114,5 @@ void tty_poll(void) {
 }
 
 void tty_start(void) {
-    asm volatile("NIOS 010");                    /* TTI busy (DG convention) */
+    asm volatile("NIOS 010" ::: "memory");                    /* TTI busy (DG convention) */
 }

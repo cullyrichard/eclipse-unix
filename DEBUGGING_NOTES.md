@@ -4507,3 +4507,52 @@ Verification, on the final toolchain: c-testsuite 206/220, the same set,
 at --ieee, default and --ieee -Oz. --ieee -Os was also 206, but that run
 came before the stack-layout change. The kernel shell session and both
 BASIC sessions pass.
+
+### 48. Variable shifts, register allocation on 2 registers, the kernel at -Os (fixed / worked around)
+
+Found adding the text/system tools and their kernel syscalls.
+
+- **Variable-count shifts were a hard compile error.** Any `x << n` or
+  `x >> n` with `n` not a constant, including rotates, stopped llc with
+  "only supports shifts by a compile-time constant" (`od`, `ps`). Fix
+  (llvm-project `LowerShift`): call `__ashlhi3`/`__lshrhi3`/`__ashrhi3`
+  (RTLIB SHL/SRL/SRA_I16, wired in both libcall tables). The new
+  `eclipse_rt.c` routines shift one bit at a time with constant shifts
+  only, and count 16 or more gives 0 (or the sign). Checked against a
+  16-bit host reference: 6 values × counts 0..16 × `<<`, `>>u`, `>>s`
+  hashed, plus spot values, identical at -O0 and -Oz.
+- **"ran out of registers" (greedy allocator).** Only AC0/AC1 are
+  allocatable. The kernel's `sys_pipe` at -Os, and BASIC's `parsenum` at
+  -O1, fail under the greedy allocator. The basic and fast allocators
+  handle both. `-debug-only=regalloc` shows greedy unable to recolor two
+  infinite-weight (unspillable) intervals that overlap a value pinned in
+  AC0. The root cause inside greedy isn't found. Two changes:
+  1. `MULrr/UDIVrr/UREMrr` now have `$dst = $lhs` and `UDIVREMrr` has
+     `$quot = $lhs, $rem = $rhs`. UDIVREMrr writes both registers, so an
+     input live past it needed a third one. With the tie the two-address
+     pass copies inputs first. This alone did not cure `sys_pipe`.
+  2. `eclipse-cc` runs llc with greedy and, if that fails with "ran out
+     of registers", runs it again with `-regalloc=basic` and says so.
+     Basic everywhere would cost space: BASIC grows ~1.8KW and no longer
+     fits.
+- **The kernel now builds at -Os** (`build.sh`, `KOPT`, default `-Os`;
+  `KOPT=` gives -O0). At -O0 the new syscalls (+1720 words) left it
+  over 32KW. At -Os it is 30762 words, against ~31900 at -O0. The total
+  is mostly data: 9 kernel stacks are 6912 words. Hardening for the
+  optimizer:
+  - every kernel inline asm (66 sites) has a `"memory"` clobber, so C
+    values aren't cached across it (e.g. `ksleep` reads `k_ks_resumed`
+    after its asm);
+  - the statics `kmem.c`'s asm names only as text are
+    `volatile __attribute__((used))`;
+  - the two `dsk.c` functions whose asm defines labels are `noinline`.
+
+  The first attempt to add the clobbers mechanically counted a `:` inside
+  a C comment and produced `: : "memory"` on the startup asm. It also
+  rewrote a file-scope `asm("dev DSKP = 027")` and a comment. All three
+  were caught by reading the diff before building, and fixed; the script
+  now skips comments. One figure was wrong at first: a half-finished -Os
+  pass suggested a ~20KW kernel. The finished build is 30762 words.
+
+Verification: see KERNEL_NOTES.md section 13 (all sessions on the -Os
+kernel) and the c-testsuite line there.

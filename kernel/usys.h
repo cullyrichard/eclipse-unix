@@ -54,4 +54,10 @@ void uputsfd(int fd, const char *s);
 #define TP_STATUS 5
 int tape(int op, int unit, char *buf, int n);
 
+/* text and system tools (ksyscall.h SYS_RENAME..SYS_KILL) */
+int rename(const char *from, const char *to);
+int psinfo(int pid, unsigned int *w);   /* w[9]: state parent pages name[6] */
+int kill(int pid);
+int fsinfo(int what);   /* 0 free blocks, 1 data blocks, 2 free inodes, 3 inodes */
+
 #endif

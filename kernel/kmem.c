@@ -23,12 +23,12 @@ static unsigned int kpoll;
  * Callers run with ION off (all kernel code does).
  */
 
-static unsigned int _k_pte;
-static unsigned int _k_off;
-static unsigned int _k_val;
-static unsigned int _k_save2;
-static unsigned int _k_save3;
-unsigned int _k_selB = 0404;
+static volatile unsigned int _k_pte __attribute__((used));
+static volatile unsigned int _k_off __attribute__((used));
+static volatile unsigned int _k_val __attribute__((used));
+static volatile unsigned int _k_save2 __attribute__((used));
+static volatile unsigned int _k_save3 __attribute__((used));
+volatile unsigned int _k_selB __attribute__((used)) = 0404;
 
 static void kfar_setB(unsigned int pfn) {
     _k_pte = pfn & 01777;  /* logical slot 0, physical page pfn */
@@ -46,6 +46,7 @@ static void kfar_setB(unsigned int pfn) {
         "LMP\n\t"                  /* Map[B][0] = pfn */
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
 }
 
@@ -65,6 +66,7 @@ void kfar_write(unsigned int pfn, unsigned int off, unsigned int val) {
         "DOA 0,MAP\n\t"            /* back to select A, enable A */
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
 }
 
@@ -82,6 +84,7 @@ unsigned int kfar_read(unsigned int pfn, unsigned int off) {
         "DOA 0,MAP\n\t"
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
     return _k_val;
 }
@@ -107,6 +110,7 @@ unsigned int kcopyin_word(unsigned int uaddr) {
         "ESTA 3,_k_val,0\n\t"
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
     return _k_val;
 }
@@ -132,6 +136,7 @@ void kcopyout_word(unsigned int uaddr, unsigned int val) {
         "ESTA 3,0,2\n\t"
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
 }
 
@@ -141,7 +146,7 @@ void kcopyout_word(unsigned int uaddr, unsigned int val) {
  * kfar_write, which reload the map for every word. n <= 1024 - off.
  * Callers keep n small (64) and poll the console between chunks
  * (KERNEL_NOTES.md section 12). noinline: the asm labels must exist once. */
-static unsigned int _k_dst, _k_cnt;
+static volatile unsigned int _k_dst __attribute__((used)), _k_cnt __attribute__((used));
 
 __attribute__((noinline))
 void kfar_bget(unsigned int pfn, unsigned int off, unsigned int *buf, unsigned int n) {
@@ -171,6 +176,7 @@ void kfar_bget(unsigned int pfn, unsigned int off, unsigned int *buf, unsigned i
         "DOA 0,MAP\n\t"            /* back to select A, enable A */
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
 }
 
@@ -202,5 +208,6 @@ void kfar_bput(unsigned int pfn, unsigned int off, const unsigned int *buf, unsi
         "DOA 0,MAP\n\t"
         "ELDA 2,_k_save2,0\n\t"
         "ELDA 3,_k_save3,0\n\t"
+        ::: "memory"
     );
 }

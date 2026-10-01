@@ -63,6 +63,10 @@ unsigned int k_ks_sp, k_ks_fp, k_ks_lim, k_ks_ac2, k_ks_ac3, k_ks_pc;
 volatile unsigned int k_ks_resumed;
 unsigned int k_n32 = 32;
 static unsigned int p_chan[NPROC], p_kin[NPROC];
+static unsigned int p_killed[NPROC];    /* SYS_KILL / ^C (KERNEL_NOTES.md) */
+#define PNAMEW 6                        /* name words (12 bytes) for ps */
+static unsigned int p_name[NPROC * PNAMEW];
+#define KILLSTAT 0177767                /* -9: exit status of a killed process */
 static unsigned int p_ksp[NPROC], p_kfp[NPROC], p_klim[NPROC];
 static unsigned int p_kac2[NPROC], p_kac3[NPROC], p_kpc[NPROC];
 static unsigned int fs_locked;
@@ -85,7 +89,7 @@ unsigned int st_lk_acq, st_lk_wait, st_lk_wait_dskbusy;
 
 
 static void k_halt(void) {
-    asm volatile("HALT\n\t");
+    asm volatile("HALT\n\t" ::: "memory");
 }
 
 static int pte_valid(unsigned int pte) {
@@ -120,6 +124,7 @@ static int proc_alloc(unsigned int nwords, unsigned int base,
     if (slast > NPAGES - 1) slast = NPAGES - 1;
 
     p_nframes[n] = 0;
+    p_killed[n] = 0;
     p_nseg[n] = 0;
     fsys_procinit(n);       /* before anything that could call proc_free */
 #ifdef KDEBUG
@@ -275,6 +280,17 @@ int proc_spawn(const char *path, int parent) {
         }
     }
     args_place(pt0, hdr[3], sw);
+    {                                   /* last path component, for ps */
+        const char *b = path;
+        unsigned int j;
+        for (j = 0; path[j]; j++)
+            if (path[j] == '/') b = path + j + 1;
+        for (j = 0; j < 2 * PNAMEW; j++) {
+            unsigned int c = *b ? (unsigned int)*b++ & 0377 : 0;
+            if (j & 1) p_name[n * PNAMEW + j / 2] |= c;
+            else p_name[n * PNAMEW + j / 2] = c << 8;
+        }
+    }
     if (parent >= 0) fsys_inherit(n, parent);
     p_parent[n] = parent;
     p_state[n] = P_RUN;
@@ -444,6 +460,7 @@ static void mapA_load(void) {
         "LMP\n\t"
         "ELDA 2,k_ks_ac2,0\n\t"
         "ELDA 3,k_ks_ac3,0\n\t"
+        ::: "memory"
     );
 }
 
@@ -530,9 +547,9 @@ static void swtch_to(int n) {
         k_ks_ac3 = p_kac3[n];
         k_ks_pc = p_kpc[n];
         k_ks_resumed = 1;
-        asm volatile("EJMP k_kswitch,0\n\t");
+        asm volatile("EJMP k_kswitch,0\n\t" ::: "memory");
     }
-    asm volatile("EJMP k_resume,0\n\t");
+    asm volatile("EJMP k_resume,0\n\t" ::: "memory");
 }
 
 /* Nothing runnable, something asleep: idle with ION on, on its own stack. */
@@ -541,12 +558,19 @@ static void idle(void) {
     curproc = -1;
     k_kbase = kstk_base(NPROC);
     k_klim = k_kbase + KSTK - 16;
-    asm volatile("EJMP k_idle,0\n\t");
+    asm volatile("EJMP k_idle,0\n\t" ::: "memory");
 }
 
 /* Round-robin: the next P_RUN slot after curproc (possibly curproc).
  * Never returns: every caller has already saved whatever it needs. */
+static void proc_kill(int n, int insched);
+static void intr_fg(void);
+
 static void sched(void) {
+    if (tty_sigint) {
+        tty_sigint = 0;
+        intr_fg();
+    }
     /* A chain of in-kernel sleeps/wakeups switches kernel-to-kernel
      * without ever re-enabling interrupts (only k_resume and the idle loop
      * do), so take a waiting keystroke here too (IO_NOTES.md overrun fix;
@@ -573,6 +597,65 @@ int kcansleep(void) {
     return curproc >= 0;
 }
 
+int kkilled(void) {
+    return curproc >= 0 && p_killed[curproc];
+}
+
+/* Kill process n. One stopped at the user boundary (preempted, or blocked
+ * in wait) exits now. One inside the kernel -- asleep, woken but not yet
+ * back out, or the caller itself in a syscall -- is only marked: it exits
+ * when its syscall returns (do_syscall), and a tty or pipe wait is woken so
+ * that happens soon. insched: called from sched(), where curproc's state
+ * is already saved, so curproc may exit directly too. -1: no such process,
+ * or the login process tree's root (parent -1). */
+static void proc_kill(int n, int insched) {
+    int s = p_state[n];
+    if (s == P_FREE || s == P_ZOMBIE || s == P_EMBRYO) return;
+    if ((s == P_RUN && !p_kin[n] && (n != curproc || insched)) ||
+        s == P_WAIT) {
+        proc_exit(n, KILLSTAT);
+        return;
+    }
+    p_killed[n] = 1;
+    if (s == P_SLEEP && (p_chan[n] == CHAN_TTY || p_chan[n] >= CHAN_PIPE))
+        p_state[n] = P_RUN;
+}
+
+static unsigned int sys_kill(unsigned int pid) {
+    if (pid >= NPROC || p_parent[pid] < 0) return 0177777;
+    if (p_state[pid] == P_FREE || p_state[pid] == P_ZOMBIE ||
+        p_state[pid] == P_EMBRYO) return 0177777;
+    proc_kill((int)pid, 0);
+    return 0;
+}
+
+/* ^C: kill every process its parent is wait()ing for -- the foreground
+ * job -- except a child of a parentless process (init's login shell).
+ * Targets are chosen first: killing a parent would orphan its child. */
+static void intr_fg(void) {
+    int i, par, hit[NPROC];
+    for (i = 0; i < NPROC; i++) {
+        par = p_parent[i];
+        hit[i] = p_state[i] != P_FREE && p_state[i] != P_ZOMBIE &&
+                 par >= 0 && p_parent[par] >= 0 &&
+                 p_state[par] == P_WAIT && p_waitpid[par] == i;
+    }
+    for (i = 0; i < NPROC; i++)
+        if (hit[i]) proc_kill(i, 1);
+}
+
+/* SYS_PSINFO: w[0] state, w[1] parent, w[2] pages, w[3..8] name */
+static unsigned int sys_psinfo(unsigned int pid, unsigned int ub) {
+    unsigned int j;
+    if (pid >= NPROC || !uvalid(ub, 18)) return 0177777;
+    kcopyout_word(ub >> 1, (unsigned int)p_state[pid]);
+    kcopyout_word((ub >> 1) + 1, (unsigned int)p_parent[pid]);
+    kcopyout_word((ub >> 1) + 2, p_nframes[pid] + p_nseg[pid]);
+    for (j = 0; j < PNAMEW; j++)
+        kcopyout_word((ub >> 1) + 3 + j, p_name[pid * PNAMEW + j]);
+    return 0;
+}
+
 void wakeup(unsigned int chan) {
     int i;
     for (i = 0; i < NPROC; i++)
@@ -596,6 +679,7 @@ __attribute__((noinline)) void ksleep(unsigned int chan) {
         "ELEF 0,ksleep_back,0\n\t"
         "ESTA 0,k_ks_pc,0\n\t"
         "ksleep_back:\n\t"
+        ::: "memory"
     );
     /* Second arrival (via k_kswitch): 040/041/042 and AC2/AC3 are back as
      * they were above, so this frame is intact; just return. */
@@ -654,6 +738,7 @@ static int sys_write_user(unsigned int buf, unsigned int len) {
     if (buf + (len - 1) < buf) return -1;       /* wraps past 0177777 */
     pt0 = (unsigned int)curproc * NPAGES;
     for (i = 0; i < len; i++) {
+        if ((i & 63) == 0) tty_poll();
         w = (buf + i) >> 1;
         if (!pte_valid(p_pt[pt0 + (w >> 10)])) return -1;
     }
@@ -661,6 +746,7 @@ static int sys_write_user(unsigned int buf, unsigned int len) {
         b = buf + i;
         w = kcopyin_word(b >> 1);
         console_putchar((int)((b & 1) ? (w & 0377) : ((w >> 8) & 0377)));
+        tty_poll();     /* polled TTO is slow: per character, as sys_writefd */
     }
     return (int)len;
 }
@@ -712,6 +798,10 @@ static void do_syscall(void) {
             sched();
             return;
         }
+    } else if (k_ac0 == SYS_KILL) {
+        r = sys_kill(k_ac1);
+    } else if (k_ac0 == SYS_PSINFO) {
+        r = sys_psinfo(k_ac1, k_ac2);
     } else if (k_ac0 == SYS_TAPE) {
         r = sys_tape(k_ac1, k_ac2, k_ac3);
     } else if (k_ac0 == SYS_SPAWN || k_ac0 == SYS_SPAWNV) {
@@ -731,7 +821,7 @@ static void do_syscall(void) {
         r = (unsigned int)c;
     } else if ((k_ac0 >= SYS_OPEN && k_ac0 <= SYS_UNLINK) ||
                (k_ac0 >= SYS_CHDIR && k_ac0 <= SYS_STAT) ||
-               k_ac0 == SYS_FREEBLK) {
+               k_ac0 == SYS_FREEBLK || k_ac0 == SYS_RENAME) {
         /* descriptor/file syscalls (fsys.c; kept out of this function so
          * its branches stay within JMP range -- SHELL_NOTES.md). The fs
          * lock only for calls that can reach fs.c: a console or pipe read
@@ -740,7 +830,7 @@ static void do_syscall(void) {
         unsigned int op = k_ac0, a1 = k_ac1, a2 = k_ac2, a3 = k_ac3;
         int lk = fsys_needslock(op, a1);
         if (lk) fs_lock();
-        r = op == SYS_FREEBLK ? fs_freeblocks() : fsys_syscall(op, a1, a2, a3);
+        r = op == SYS_FREEBLK ? fs_info(a1) : fsys_syscall(op, a1, a2, a3);
         if (lk) fs_unlock();
     } else {
         r = 0177777;        /* -1: unknown syscall */
@@ -748,6 +838,11 @@ static void do_syscall(void) {
     /* resume the caller: AC0 = result, rest unchanged by SYC. The DIA
      * readback's bit 0 is unreliable after SYC (TRAP_NOTES.md) and is
      * not used -- every process runs with the same P_MAPSTAT. */
+    if (p_killed[curproc]) {            /* killed during this syscall */
+        proc_exit(curproc, KILLSTAT);
+        sched();
+        return;
+    }
     k_ac0 = r;
     k_mapstat = P_MAPSTAT;
 }
@@ -859,7 +954,7 @@ void k_start(void) {
     }
     if (bdev_devcode)           /* interrupt-driven disk backend (DSK) */
         k_pimask &= ~0100u;
-    asm volatile("NIOC 022");   /* MTA: drop Done left by the tape boot */
+    asm volatile("NIOC 022" ::: "memory");   /* MTA: drop Done left by the tape boot */
     tty_start();
     asm volatile(
         "ELEF 0,k_stkflt,0\n\t"
@@ -875,6 +970,7 @@ void k_start(void) {
         "ELDA 0,k_pitinit,0\n\t"
         "DOA 0,PIT\n\t"
         "NIOS PIT\n\t"             /* self-arming periodic tick */
+        ::: "memory"
     );
     curproc = -1;
     sched();                       /* never returns */

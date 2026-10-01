@@ -20,5 +20,7 @@
 void ksleep(unsigned int chan);
 void wakeup(unsigned int chan);
 int kcansleep(void);        /* 1 if inside a process's syscall */
+int kkilled(void);          /* 1 if the current process has been killed:
+                               interruptible waits (tty, pipe) give up */
 
 #endif

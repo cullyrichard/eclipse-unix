@@ -16,11 +16,11 @@
  */
 
 static void dsk_set_blockaddr(unsigned int blockno) {
-    asm volatile("DOA %0,020" :: "r"(blockno));
+    asm volatile("DOA %0,020" :: "r"(blockno) : "memory");
 }
 
 static void dsk_set_memaddr(unsigned int addr) {
-    asm volatile("DOB %0,020" :: "r"(addr));
+    asm volatile("DOB %0,020" :: "r"(addr) : "memory");
 }
 
 /* Bare DIA -- does not clear status, matching disk_probe.s's own DIA
@@ -29,11 +29,11 @@ static void dsk_set_memaddr(unsigned int addr) {
  * never re-read afterward). */
 static unsigned int dsk_read_status(void) {
     unsigned int status;
-    asm volatile("DIA %0,020" : "=r"(status));
+    asm volatile("DIA %0,020" : "=r"(status) : : "memory");
     return status;
 }
 
-int dsk_read_block(unsigned int blockno, unsigned int *buf) {
+__attribute__((noinline)) int dsk_read_block(unsigned int blockno, unsigned int *buf) {
     if (blockno > DSK_MAX_BLOCK)
         return -1;
 
@@ -55,16 +55,18 @@ int dsk_read_block(unsigned int blockno, unsigned int *buf) {
      * (non-static-inline, not force-inlined) function compiled once, so
      * its body -- and this label -- is emitted exactly once no matter
      * how many call sites invoke it. */
-    asm volatile("NIOS 020");
+    asm volatile("NIOS 020" ::: "memory");
     asm volatile(
         "dsk_read_wait:\n\t"
         "SKPDN 020\n\t"
-        "JMP dsk_read_wait\n\t");
+        "JMP dsk_read_wait\n\t"
+        ::: "memory"
+    );
 
     return (int)dsk_read_status();
 }
 
-int dsk_write_block(unsigned int blockno, unsigned int *buf) {
+__attribute__((noinline)) int dsk_write_block(unsigned int blockno, unsigned int *buf) {
     if (blockno > DSK_MAX_BLOCK)
         return -1;
 
@@ -73,11 +75,13 @@ int dsk_write_block(unsigned int blockno, unsigned int *buf) {
 
     /* NIOP: pulse P, starts a WRITE (buf -> disk block). Fixed label,
      * same reason as dsk_read_block's wait loop above. */
-    asm volatile("NIOP 020");
+    asm volatile("NIOP 020" ::: "memory");
     asm volatile(
         "dsk_write_wait:\n\t"
         "SKPDN 020\n\t"
-        "JMP dsk_write_wait\n\t");
+        "JMP dsk_write_wait\n\t"
+        ::: "memory"
+    );
 
     return (int)dsk_read_status();
 }
