@@ -4603,3 +4603,60 @@ per-character delay, if it has one, avoids the problem.
 Regression: `tests/session_full.txt`, `tests/basic_session.txt` and
 `kernel/edittest.py` are unchanged. `tests/tools_session.txt` differs
 only in `edit`'s file size.
+
+### 50. Does the new compiler still run the original code the same? (checked: yes)
+
+Question from the user after #46–#49: do the original programs, the
+FPS-100 ones especially, still work? None of the FPS programs can run in
+SIMH, which has no FPS-100. Baseline for the comparison: LLVM `f6e3c396f`
+with eclipse-package `ea931e1`, the state just before the BASIC /
+optimization work.
+
+**FPS-100 programs (all 13 in `examples/build-realhw.sh`).**
+`tools/fps-standin/` adds a logging stand-in for devices 054/055 to a
+private build of the simulator (`build-sim.sh`; `~/dev/simh-src` is not
+modified).
+- Every `DOA`/`DOB`/`DIx`/`NIOx` is logged with its value. Reads return
+  a fixed LFSR sequence, and `DIC` (busy) returns 0.
+- It is not an FPS-100 model. Two builds that drive the board the same
+  way produce the same log and see the same answers.
+- `compare.sh BASELINE_LLVM_BUILD` builds every program with both
+  compilers along `build-realhw.sh`'s path, runs both, and compares
+  console output and every device operation.
+- A differing value passes only if it is the same `symbol+offset` in
+  each build's own listing, or the same offset from each build's
+  `_STACKTOP` (a buffer in `main`'s frame).
+
+Result: 13/13 identical console output. Of 17,200 device operations,
+16,676 are identical and 532 are the same DMA buffer at an address moved
+by a few words, because the code got a little shorter (the MUL/DIV ties
+of #48). None are different. The baseline builds are byte-identical to
+the shipped `examples/out-realhw/*.ab` (2026-10-01).
+
+**Other examples, run in SIMH, baseline vs current `eclipse-cc
+--ieee`.** Identical output for:
+- bigarray_offset_test, blockdev_test, char_ptr_test, char_test,
+  console_test, frame_scratch_test;
+- mmpu_far_test, mmpu_far_multi_test, pmm_test, printf_octal_check,
+  sizeof_check, syscall_test;
+- test_float, _cmp, _conv, _div and _mul;
+- test_hwfloat, _bits, _ext and _minimal;
+- test_print_float.
+
+`syscall_test` prints `H` and then hangs under both compilers: the
+pre-existing problem noted under #38. c-testsuite: 206/220, the same set
+(#47, #48).
+
+**Found on the way: `build-realhw.sh` doesn't use this repo's toolchain
+scripts.** `eclipse-compile.sh` defaults to
+`TOOLCHAIN=~/dev/eclipse-toolchain`, a separate copy dated Sep 1. Its
+`reorder_asm.py` and `eclipse_rt.c` predate #36, #38, #39, #40 and #44.
+For example, its address counter undercounts 2-word instructions: it
+put `buf` 31 words away from where dgasm placed it in
+`mandel240_diag4`. That's harmless there only because its stack sits
+4096 words past its estimate.
+- This is the path that produced the FPS binaries confirmed on the real
+  machine, so it is left as it is.
+- With `TOOLCHAIN` pointed at this repo, the same check also shows
+  identical FPS-100 traffic for all 13 programs. Switching is safe as
+  far as the stand-in can tell.
