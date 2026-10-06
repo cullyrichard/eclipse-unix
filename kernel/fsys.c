@@ -226,7 +226,7 @@ unsigned int sys_read(unsigned int fd, unsigned int ubuf, unsigned int n) {
             if (m > sizeof lb) m = sizeof lb;
             got = tty_readline(lb, m);
             for (i = 0; i < got; i++) uputb(ubuf + done + i, (unsigned int)lb[i]);
-            if (got == 0 || lb[got - 1] == '\n') { done += got; break; }
+            if (got == 0 || lb[got - 1] == '\n' || tty_raw) { done += got; break; }
         }
         return done;
     }

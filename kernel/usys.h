@@ -59,5 +59,6 @@ int rename(const char *from, const char *to);
 int psinfo(int pid, unsigned int *w);   /* w[9]: state parent pages name[6] */
 int kill(int pid);
 int fsinfo(int what);   /* 0 free blocks, 1 data blocks, 2 free inodes, 3 inodes */
+int ttyraw(int on);      /* 1 raw console input, 0 normal; returns the old mode */
 
 #endif

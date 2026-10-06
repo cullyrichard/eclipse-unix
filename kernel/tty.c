@@ -18,6 +18,7 @@ static unsigned int thead, ttail, tcount;   /* ring buffer */
 static unsigned int tlines;                 /* complete lines buffered */
 unsigned int tty_nintr, tty_npoll, tty_ncalls;  /* statistics */
 unsigned int tty_sigint;
+int tty_raw, tty_rawpid = -1;
 
 static void tput(unsigned int c) {
     tbuf[ttail] = (char)c;
@@ -29,8 +30,18 @@ static unsigned int tget(void) {
     unsigned int c = (unsigned int)tbuf[thead] & 0377;
     thead = (thead + 1) % TTYBUF;
     tcount--;
-    if (c == '\n') tlines--;
+    if (c == '\n' && tlines) tlines--;
     return c;
+}
+
+/* SYS_TTYRAW. Switching mode drops anything already typed: half a cooked
+ * line would otherwise reach a raw reader, or the reverse. */
+unsigned int tty_setraw(unsigned int on, int pid) {
+    unsigned int old = (unsigned int)tty_raw;
+    tty_raw = on ? 1 : 0;
+    tty_rawpid = on ? pid : -1;
+    thead = ttail = tcount = tlines = 0;
+    return old;
 }
 
 void tty_intr(void) {
@@ -38,6 +49,13 @@ void tty_intr(void) {
     tty_nintr++;
     asm volatile("DIAC %0,010" : "=r"(c) : : "memory");
     c &= 0177;
+    if (tty_raw) {                              /* SYS_TTYRAW: as typed */
+        if (tcount < TTYBUF - 1) {
+            tput(c);
+            wakeup(CHAN_TTY);
+        }
+        return;
+    }
     if (c == '\r') c = '\n';
     if (c == 003) {                             /* ^C: drop typed-ahead */
         thead = ttail = tcount = tlines = 0;    /* input, and let sched() */
@@ -76,7 +94,8 @@ void tty_intr(void) {
 }
 
 static void tty_wait_line(void) {
-    while (tlines == 0 && tcount < TTYBUF - 1 && !kkilled())
+    while ((tty_raw ? tcount == 0 : tlines == 0 && tcount < TTYBUF - 1) &&
+           !kkilled())
         ksleep(CHAN_TTY);
 }
 
@@ -88,7 +107,7 @@ unsigned int tty_readline(char *k, unsigned int n) {
         c = tget();
         k[done] = (char)c;
         done++;
-        if (c == '\n') break;
+        if (c == '\n' && !tty_raw) break;
     }
     return done;
 }

@@ -30,7 +30,7 @@ case "$kdisk" in
 esac
 echo "$kdisk" > "$out/kdisk"
 
-progs="init sh tar ed basic echo cat ls mkdir rm wc cp pwd grep head tail sort od cmp mv more ps kill df fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
+progs="init sh tar ed edit basic echo cat ls mkdir rm wc cp pwd grep head tail sort od cmp mv more ps kill df fstest fswriter worker badptr badread escape bigmem winfault spinner ttyread"
 files=()
 # Per-program stack (words above _STACKTOP; the kernel maps at least
 # STACKWORDS=1024 of it, more if the image's header asks) and -O level.

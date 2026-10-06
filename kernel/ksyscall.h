@@ -72,5 +72,11 @@
                              ^C on the console kills every child its
                              parent is wait()ing for, except the login
                              shell (KERNEL_NOTES.md). */
+#define SYS_TTYRAW   40   /* on -> previous mode. 1: raw console input for
+                             screen programs -- no echo, no line editing,
+                             no ^C, CR passed as CR, a read returns what
+                             has been typed as soon as there is anything.
+                             0: normal (cooked). Reset to cooked when the
+                             process that set it exits. */
 
 #endif

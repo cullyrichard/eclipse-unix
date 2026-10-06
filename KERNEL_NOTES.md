@@ -689,3 +689,25 @@ about 1 us per instruction, 3.2 ms is more than one 4800-baud
 character time (2.1 ms). So a continuous burst of typing during a
 polled disk read can still lose a character. The fix would be to poll
 inside the DSK wait loop.
+
+## 14. Raw console input (SYS_TTYRAW 40)
+
+For screen programs (`edit`).
+
+- `ttyraw(1)` makes `tty_intr` store each character as typed: no echo,
+  no erase handling, no ^C, and CR stays CR. A console `read` then
+  returns as soon as anything is buffered, instead of waiting for a line.
+- `ttyraw(0)` restores normal (cooked) input.
+- Switching mode drops whatever was typed ahead.
+- The mode belongs to the process that set it: `proc_exit` puts the
+  console back to cooked mode, so a program that dies can't leave the
+  shell without echo.
+- In raw mode ^C is an ordinary key (the editor shows the cursor
+  position with it). A program hung in raw mode can only be killed with
+  `kill` from elsewhere, which this system's single console doesn't
+  offer yet.
+
+Regression after the change: `tests/session_full.txt` and
+`tests/tools_session.txt` match their earlier transcripts. The only
+differences are from the extra `/bin/edit`: inode numbers, `/bin`
+listings and `df` counts.

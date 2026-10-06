@@ -341,6 +341,7 @@ static void sched(void);
  * to a waiting parent or keep it as a zombie, orphan its children. */
 static void proc_exit(int n, unsigned int status) {
     int i, par;
+    if (tty_raw && tty_rawpid == n) tty_setraw(0, -1);   /* back to cooked */
     proc_free(n);
     for (i = 0; i < NPROC; i++) {
         if (p_state[i] != P_FREE && p_parent[i] == n) {
@@ -798,6 +799,8 @@ static void do_syscall(void) {
             sched();
             return;
         }
+    } else if (k_ac0 == SYS_TTYRAW) {
+        r = tty_setraw(k_ac1, curproc);
     } else if (k_ac0 == SYS_KILL) {
         r = sys_kill(k_ac1);
     } else if (k_ac0 == SYS_PSINFO) {

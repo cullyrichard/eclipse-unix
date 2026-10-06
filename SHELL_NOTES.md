@@ -390,3 +390,46 @@ blocking and waking both ends dozens of times, and came out identical.
     - `ls -l /bin | more` stops once at `--More--`.
     - BASIC running `10 X=X+1 : 20 GOTO 10` stops at ^C with status -9.
     - At shutdown: faults=0 and all 992 frames free.
+- **`edit [-r rows] [-c cols] [file]`**: a nano-style screen editor for
+  an ANSI/VT100 terminal, 24x80 unless told otherwise.
+  - Keys: `^G` help, `^O` write, `^X` exit (asks to save a modified
+    buffer), `^W` search (case-insensitive, wraps), `^K` cut a line
+    (repeat to collect several), `^U` paste, `^_` go to line, `^C`
+    cursor position, `^Y`/`^V` page, `^A`/`^E` line start/end, `^D`
+    delete, Backspace, `^L` redraw. The arrow keys and Home, End, PgUp,
+    PgDn and Delete also work.
+  - Text lives in a gap buffer in segment memory (SYS_SEGALLOC),
+    mapped once into the logical pages above the stack (SYS_MAPWIN). It
+    adds nothing to the program image, and holds about 32 KB plus a 4 KB
+    cut buffer. A larger file is refused, not truncated.
+  - Console input is raw (SYS_TTYRAW, KERNEL_NOTES.md section 14).
+  - The screen is drawn by comparing every row with a copy of what the
+    terminal already shows, and sending only the changed span. Measured
+    in SIMH: one cursor move is 16 bytes, typing a character is about
+    10, and a 24x80 screen is about 1,900. At 4800 baud that's 33 ms,
+    21 ms and 4 s.
+  - The last column is never written (no auto-wrap surprises). A long
+    line scrolls the whole view sideways to keep the cursor visible,
+    and a `$` marks text cut off on the right.
+  - Not supported:
+    - DG Dasher terminals: their control codes would have to come from
+      a manual; ANSI is isolated in `tgoto`/`tclreol`/`tattr`/`tclear`.
+    - undo, search-and-replace, and reading a second file into the
+      buffer.
+  - Under SIMH, `kernel/console.sh` moves SIMH's own break key from ^E
+    to ^], because the editor uses ^E.
+  - Tested two ways:
+    - On the host (the same source with `malloc` in place of the
+      segment): cut/paste order, Backspace joining lines, `^D`,
+      wrapped case-insensitive search, sideways scroll, quit-discard,
+      quit-save under a new name, and cancel. Files were compared byte
+      for byte.
+    - In SIMH through a real pty, by `kernel/edittest.py`, with the
+      terminal screen rebuilt by `kernel/vt.py` (a small VT100 model).
+      Covered: open, page down, go to line, end of a 110-character
+      line, the Home key, cut 2 lines / paste, search, `^C`, help,
+      write, and exit. Back in the shell, `head` and `wc` confirm the
+      saved file. At halt: faults=0, 992 frames free.
+  - Bug the pty test found: after a jump (go to line), the screen showed
+    the new position one keystroke late. `draw()` copied `top` before
+    `scrollfix()` moved it.
