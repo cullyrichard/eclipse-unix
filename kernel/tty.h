@@ -5,7 +5,7 @@ void tty_intr(void);
 void tty_start(void);
 unsigned int tty_readline(char *k, unsigned int n);
 unsigned int tty_getc(void);
-extern unsigned int tty_nintr, tty_npoll, tty_ncalls;
+extern unsigned int tty_nintr, tty_npoll, tty_ncalls, tty_ndrop;
 extern unsigned int tty_sigint;     /* ^C typed; proc.c sched() acts on it */
 extern int tty_raw;                 /* SYS_TTYRAW: 1 raw, 0 cooked */
 extern int tty_rawpid;              /* process that set raw mode */

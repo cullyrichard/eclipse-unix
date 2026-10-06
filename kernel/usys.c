@@ -125,3 +125,4 @@ int psinfo(int pid, unsigned int *w) { return __syscall(SYS_PSINFO, pid, (int)w)
 int kill(int pid)                    { return __syscall(SYS_KILL, pid, 0); }
 int fsinfo(int what)                 { return __syscall(SYS_FREEBLK, what, 0); }
 int ttyraw(int on)                   { return __syscall(SYS_TTYRAW, on, 0); }
+int ttypending(void)                 { return __syscall(SYS_TTYRAW, 2, 0); }

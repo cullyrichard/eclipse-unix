@@ -11,12 +11,13 @@
 #include "ksync.h"
 #include "../examples/console.h"
 
-#define TTYBUF 128
+#define TTYBUF 512                   /* was 128: pastes overflowed it */
 
 static char tbuf[TTYBUF];
 static unsigned int thead, ttail, tcount;   /* ring buffer */
 static unsigned int tlines;                 /* complete lines buffered */
 unsigned int tty_nintr, tty_npoll, tty_ncalls;  /* statistics */
+unsigned int tty_ndrop;                     /* characters lost, buffer full */
 unsigned int tty_sigint;
 int tty_raw, tty_rawpid = -1;
 
@@ -38,6 +39,7 @@ static unsigned int tget(void) {
  * line would otherwise reach a raw reader, or the reverse. */
 unsigned int tty_setraw(unsigned int on, int pid) {
     unsigned int old = (unsigned int)tty_raw;
+    if (on == 2) return tcount;         /* query: characters waiting */
     tty_raw = on ? 1 : 0;
     tty_rawpid = on ? pid : -1;
     thead = ttail = tcount = tlines = 0;
@@ -53,6 +55,8 @@ void tty_intr(void) {
         if (tcount < TTYBUF - 1) {
             tput(c);
             wakeup(CHAN_TTY);
+        } else {
+            tty_ndrop++;
         }
         return;
     }
@@ -81,6 +85,7 @@ void tty_intr(void) {
         return;
     }
     if (tcount >= TTYBUF - 1) {                 /* full: drop it, let */
+        tty_ndrop++;
         wakeup(CHAN_TTY);                       /* readers drain */
         return;
     }
@@ -104,6 +109,7 @@ unsigned int tty_readline(char *k, unsigned int n) {
     unsigned int done = 0, c;
     tty_wait_line();
     while (done < n && tcount > 0) {
+        if ((done & 7) == 7) tty_poll();    /* long reads: pastes (section 15) */
         c = tget();
         k[done] = (char)c;
         done++;

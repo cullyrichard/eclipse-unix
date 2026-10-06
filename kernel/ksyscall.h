@@ -77,6 +77,7 @@
                              no ^C, CR passed as CR, a read returns what
                              has been typed as soon as there is anything.
                              0: normal (cooked). Reset to cooked when the
-                             process that set it exits. */
+                             process that set it exits. 2: no change, just
+                             return how many characters are waiting. */
 
 #endif

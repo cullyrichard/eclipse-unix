@@ -4556,3 +4556,50 @@ Found adding the text/system tools and their kernel syscalls.
 
 Verification: see KERNEL_NOTES.md section 13 (all sessions on the -Os
 kernel) and the c-testsuite line there.
+
+### 49. Pasting into `edit` lost most of the text (fixed)
+
+Reported by the user: "I cannot paste in long text". A 1400-character,
+40-line paste into `edit` in SIMH kept 160 characters.
+
+- **Cause:** the editor redrew the screen after every character, and a
+  redraw takes far longer than the next pasted character takes to
+  arrive. The kernel's raw console buffer (128 characters) filled, and
+  `tty_intr` dropped the rest silently.
+- **Fix, editor:** draw only when no input is waiting. `SYS_TTYRAW 2`
+  returns the count of buffered characters (`ttypending()`), so a paste
+  is applied in full and drawn once.
+- **Fix, kernel:**
+  - `TTYBUF` 128 → 512. This also lifts the cooked-mode line limit from
+    127 to 511 characters.
+  - New `tty_ndrop` counter, printed at shutdown as `tty_drop=`, so loss
+    can't be silent again.
+  - `tty_poll` every 8 characters in the console read copy loops.
+- **Result:** `kernel/pastetest.py` pastes 20,390 bytes (400 lines) in
+  one burst through a pty. The Eclipse's `cmp` against a reference copy
+  put on the disk image returns status 0, and `tty_drop=0`.
+
+**A second finding from tracing the paste** (`TRACE=1 ./console.sh` →
+`./trace.log`, then `gapprof.py`):
+
+- `fs_trunc` walked all 256 indirect-block entries with a `bread`
+  (cache lookup) each and no `tty_poll`. That's 72,670 instructions with
+  input unchecked. It happens whenever a save overwrites a file over
+  4 KB, the normal case for `^O`. At roughly 1 us per instruction that
+  is about 70 ms, or about 35 lost keystrokes at 4800 baud on real
+  hardware.
+- Now polled every 8 entries. Tracing a save over the 20 KB file, the
+  longest unpolled stretch is 3,229: the polled DSK read wait, open
+  since KERNEL_NOTES.md section 13. `fs_trunc`'s own stretch is 2,487.
+
+On real hardware, pasting relies on the kernel taking each character
+within one character time (the TTI holds one character): about 2 ms at
+4800 baud. The 3,229-instruction worst case is close to that, so a
+paste at full line speed during a disk read could still drop a
+character. The `tty_drop` counter can't see a TTI overrun (that happens
+in hardware). Setting the terminal emulator to a short per-line or
+per-character delay, if it has one, avoids the problem.
+
+Regression: `tests/session_full.txt`, `tests/basic_session.txt` and
+`kernel/edittest.py` are unchanged. `tests/tools_session.txt` differs
+only in `edit`'s file size.

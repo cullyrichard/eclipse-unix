@@ -566,7 +566,12 @@ int main(int argc, char **argv) {
     ttyraw(1);
     tclear();
     for (;;) {
-        draw();
+        /* Redraw only when no input is waiting: a paste (or fast typing)
+         * is applied in full, then drawn once. Drawing after every
+         * character took far longer than the characters took to arrive,
+         * and the kernel's console buffer overflowed (DEBUGGING_NOTES.md
+         * #49). */
+        if (ipos >= ilen && ttypending() == 0) draw();
         k = getkey();
         if (k != CTL('K')) lastcut = 0;
         if (k != CTL('C')) msg[0] = 0;

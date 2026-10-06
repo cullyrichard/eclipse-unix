@@ -268,6 +268,7 @@ void fs_trunc(unsigned int inum) {
     }
     if (ip[I_INDIR]) {
         for (i = 0; i < NINDIRECT; i++) {
+            if ((i & 7) == 0) tty_poll();   /* 256 entries: 72,670 instructions unpolled */
             b = bread(ip[I_INDIR]);
             a = b[i];
             if (a) bfree(a);

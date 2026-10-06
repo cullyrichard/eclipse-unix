@@ -433,3 +433,8 @@ blocking and waking both ends dozens of times, and came out identical.
   - Bug the pty test found: after a jump (go to line), the screen showed
     the new position one keystroke late. `draw()` copied `top` before
     `scrollfix()` moved it.
+  - Pasting: input that's already waiting is applied before the screen
+    is redrawn, so a paste is drawn once at the end.
+    `kernel/pastetest.py`: a 20 KB, 400-line paste arrives byte-exact
+    (`cmp` status 0, `tty_drop=0`). Before this fix only 160 of 1400
+    characters survived (DEBUGGING_NOTES.md #49).

@@ -506,6 +506,8 @@ static void shutdown(void) {
     kputu(st_idle);
     kputs(" tty_intr=");
     kputu(tty_nintr);
+    kputs(" tty_drop=");
+    kputu(tty_ndrop);
 #ifdef FSLOCK_STATS
     kputs(" fslock acq/wait/wait-while-disk-busy=");
     kputu(st_lk_acq); kputs("/"); kputu(st_lk_wait); kputs("/"); kputu(st_lk_wait_dskbusy);

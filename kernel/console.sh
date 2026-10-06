@@ -19,6 +19,9 @@ trap 'rm -f "$ini"' EXIT
   esac
   cat "$out/kernel.simh"
   echo 'dep PC 50'
+  # TRACE=1: full instruction trace, written by the simulator to
+  # ./trace.log (hardcoded in eclipse_cpu.c) -- for kernel/gapprof.py
+  [ -n "${TRACE:-}" ] && echo 'd debug 100003'
   echo 'go'
   echo 'quit'                                       # after the kernel halts
 } > "$ini"
