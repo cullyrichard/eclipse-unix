@@ -1,5 +1,40 @@
+# eclipse-unix — a Unix-like OS for the Data General Eclipse S/140
+# THIS PACKAGE WAS WRITTEN WITH CLAUDE. THE OS HAS ONLY RUN IN SIMH SO FAR, NOT ON REAL HARDWARE. THERE ARE ALMOST CERTAINLY BUGS AND EDGE CASES WHERE THINGS WILL NOT WORK. PROCEED WITH CAUTION.
+
+This repository continues
+[eclipse-llvm-backend](https://github.com/cullyrichard/eclipse-llvm-backend),
+which stays as it was on 2026-09-16 (commit `189978e`), the C compiler
+known to work there. Everything after that lives here, so the original
+compiler repository is never changed by this work. The full history is
+included.
+
+New here since then:
+
+- **`kernel/`** — a preemptive multi-process kernel using the MMPU
+  (KERNEL_NOTES.md).
+  - Filesystem: V6-style, on the DG 4019 (DSK), DG 4231 (DKP), the
+    DSKP family (build only), or a RAM disk loaded from tape
+    (FS_NOTES.md).
+  - Interrupt-driven console and disk (IO_NOTES.md).
+  - A shell with pipes and redirection (SHELL_NOTES.md).
+  - Userland: `tar` (magtape), `ed`, `edit` (nano-style), `basic`,
+    `grep head tail sort od cmp mv more ps kill df` and the basics.
+  - `kernel/build.sh` builds the media: `kernel.ab`, `kernel.tap`,
+    `install.tap`, `disk.img`.
+  - `kernel/console.sh` boots it in SIMH with your terminal as the
+    console.
+- **Compiler fixes and additions the OS needed**, in
+  `eclipse-backend.patch` and `eclipse-toolchain/`: DEBUGGING_NOTES.md
+  #35–#48, including byte-address pointers (#38), `-O` levels (#47),
+  variable shifts (#48), and the stack placed above `_STACKTOP` (#47).
+- **`tools/fps-standin/`** — checks that a compiler change leaves the
+  FPS-100 programs' behaviour unchanged (DEBUGGING_NOTES.md #50).
+
+What follows is the original compiler package README.
+
+---
+
 # Eclipse LLVM Backend — Setup Package
-# THIS PACKAGE WAS WRITTEN WITH CLAUDE. IT HAS BEEN TESTED WITH REAL HARDWARE. THERE ARE ALMOST CERTAINLY BUGS AND EDGE CASES WHERE THINGS WILL NOT WORK. PROCEED WITH CAUTION.
 
 This is a real LLVM/Clang backend targeting the Data General Nova/Eclipse
 S/140 (a 16-bit minicomputer from 1979-1986), plus a small toolchain wrapper
